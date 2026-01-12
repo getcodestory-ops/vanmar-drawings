@@ -12,7 +12,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, validator
-from sqlalchemy import create_engine, Column, String, DateTime, Integer, Text, Boolean
+from sqlalchemy import create_engine, Column, String, DateTime, Integer, Text, Boolean, text
 from sqlalchemy.orm import sessionmaker, declarative_base, Session
 from cryptography.fernet import Fernet
 from slowapi import Limiter, _rate_limit_exceeded_handler
@@ -33,11 +33,21 @@ setup_logging(settings.ENVIRONMENT, "INFO" if settings.is_production else "DEBUG
 logger = get_logger(__name__)
 
 # Database setup
+# For PostgreSQL, add SSL mode if not specified in URL
+connect_args = {}
+if settings.DATABASE_URL.startswith("sqlite"):
+    connect_args["check_same_thread"] = False
+elif settings.DATABASE_URL.startswith("postgresql"):
+    # Render.com PostgreSQL requires SSL
+    if "sslmode" not in settings.DATABASE_URL:
+        connect_args["sslmode"] = "require"
+
 engine = create_engine(
     settings.DATABASE_URL,
-    connect_args={"check_same_thread": False} if settings.DATABASE_URL.startswith("sqlite") else {},
+    connect_args=connect_args,
     pool_pre_ping=True,
-    pool_recycle=3600
+    pool_recycle=3600,
+    echo=False  # Set to True for SQL query logging (debugging)
 )
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
@@ -87,7 +97,12 @@ class ScheduledJob(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
-Base.metadata.create_all(bind=engine)
+# Tables will be created on startup via lifespan function
+# This prevents module-level errors if database isn't ready
+try:
+    Base.metadata.create_all(bind=engine)
+except Exception as e:
+    logger.warning(f"Could not create tables at import time (will retry on startup): {e}")
 
 
 # ---------------------------------------------------------
@@ -164,6 +179,21 @@ class HealthResponse(BaseModel):
 async def lifespan(app: FastAPI):
     """Manage app lifecycle."""
     logger.info(f"Starting Procore PDF Merger - Environment: {settings.ENVIRONMENT}")
+    logger.info(f"Database URL: {settings.DATABASE_URL[:20]}..." if settings.DATABASE_URL else "DATABASE_URL not set")
+    
+    # Ensure database tables exist
+    try:
+        Base.metadata.create_all(bind=engine)
+        logger.info("Database tables verified/created successfully")
+        
+        # Test database connection
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+            logger.info("Database connection test successful")
+    except Exception as e:
+        logger.error(f"Database initialization failed: {e}", exc_info=True)
+        # Don't crash the app, but log the error clearly
+        logger.warning("App will continue but database operations may fail")
     
     # Start scheduler
     scheduler.start()
@@ -887,8 +917,11 @@ async def health_check(db: Session = Depends(get_db)):
     # Check database
     db_status = "healthy"
     try:
-        db.execute("SELECT 1")
-    except:
+        # Proper SQLAlchemy syntax for executing raw SQL
+        db.execute(text("SELECT 1"))
+        db.commit()
+    except Exception as e:
+        logger.error(f"Database health check failed: {e}", exc_info=True)
         db_status = "unhealthy"
     
     # Check disk space
