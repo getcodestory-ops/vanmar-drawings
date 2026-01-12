@@ -169,6 +169,8 @@ class HealthResponse(BaseModel):
     disk_space_mb: int
     environment: str
     version: str = "1.0.0"
+    redirect_uri: Optional[str] = None  # Show redirect URI for OAuth debugging
+    redirect_uri: Optional[str] = None  # Show redirect URI for OAuth debugging
 
 
 # ---------------------------------------------------------
@@ -939,7 +941,8 @@ async def health_check(db: Session = Depends(get_db)):
         status="healthy" if db_status == "healthy" else "degraded",
         database=db_status,
         disk_space_mb=disk_usage,
-        environment=settings.ENVIRONMENT
+        environment=settings.ENVIRONMENT,
+        redirect_uri=settings.redirect_uri  # Include redirect URI for debugging
     )
 
 
