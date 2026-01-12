@@ -230,6 +230,9 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 templates = Jinja2Templates(directory="templates")
 if not os.path.exists("output"):
     os.makedirs("output")
+if not os.path.exists("static"):
+    os.makedirs("static")
+app.mount("/static", StaticFiles(directory="static"), name="static")
 app.mount("/output", StaticFiles(directory="output"), name="output")
 
 
