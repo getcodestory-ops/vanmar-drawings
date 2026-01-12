@@ -466,8 +466,11 @@ async def home(request: Request, access_token: str = Cookie(None)):
 @app.get("/login")
 async def login():
     """Redirect to Procore OAuth login."""
-    url = f"{settings.login_url}?response_type=code&client_id={settings.PROCORE_CLIENT_ID}&redirect_uri={settings.redirect_uri}"
-    logger.info(f"Redirecting to Procore OAuth: {url}")
+    from urllib.parse import quote_plus
+    # URL encode the redirect_uri to ensure proper encoding
+    redirect_uri_encoded = quote_plus(settings.redirect_uri)
+    url = f"{settings.login_url}?response_type=code&client_id={settings.PROCORE_CLIENT_ID}&redirect_uri={redirect_uri_encoded}"
+    logger.info(f"Redirecting to Procore OAuth. Redirect URI (raw): {settings.redirect_uri}")
     return RedirectResponse(url)
 
 
@@ -938,6 +941,24 @@ async def health_check(db: Session = Depends(get_db)):
         disk_space_mb=disk_usage,
         environment=settings.ENVIRONMENT
     )
+
+
+@app.get("/debug/redirect-uri")
+async def debug_redirect_uri():
+    """Production-safe endpoint to show the exact redirect URI being used."""
+    return JSONResponse({
+        "redirect_uri": settings.redirect_uri,
+        "base_url": settings.BASE_URL,
+        "render_external_url": os.getenv("RENDER_EXTERNAL_URL"),
+        "environment": settings.ENVIRONMENT,
+        "instructions": {
+            "step_1": "Copy the redirect_uri value above",
+            "step_2": "Go to https://developers.procore.com/",
+            "step_3": "Select your app and go to Redirect URIs",
+            "step_4": "Add the EXACT redirect_uri (must match character-for-character)",
+            "step_5": "Common mistakes: trailing slash, http vs https, wrong domain"
+        }
+    })
 
 
 @app.get("/debug/config")

@@ -48,11 +48,13 @@ class Settings(BaseSettings):
     def redirect_uri(self) -> str:
         """Generate OAuth redirect URI based on environment."""
         if self.BASE_URL:
-            return f"{self.BASE_URL}/callback"
+            base = self.BASE_URL.rstrip('/')  # Remove trailing slash
+            return f"{base}/callback"
         
         # Check for Render environment variable
         render_url = os.getenv("RENDER_EXTERNAL_URL")
         if render_url:
+            render_url = render_url.rstrip('/')  # Remove trailing slash
             return f"{render_url}/callback"
         
         # Default to localhost for development

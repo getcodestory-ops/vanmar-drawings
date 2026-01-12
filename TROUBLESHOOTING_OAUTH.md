@@ -36,10 +36,10 @@ When you try to login, check your terminal/console where uvicorn is running. Loo
 
 **Fix:**
 1. Check what redirect URI your app is using:
-   ```
-   http://localhost:8000/debug/config
-   ```
-   Note the `redirect_uri` value (should be `http://localhost:8000/callback`)
+   - **Production (Render):** `https://YOUR-APP-NAME.onrender.com/debug/redirect-uri`
+   - **Local Development:** `http://localhost:8000/debug/config`
+   
+   Copy the **exact** `redirect_uri` value shown.
 
 2. Go to Procore Developer Portal:
    - https://developers.procore.com/
