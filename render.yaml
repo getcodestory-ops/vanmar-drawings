@@ -1,0 +1,36 @@
+services:
+  - type: web
+    name: procore-pdf-merger
+    env: python
+    region: oregon
+    plan: free
+    buildCommand: "pip install -r production/requirements.txt"
+    startCommand: "cd production && uvicorn app:app --host 0.0.0.0 --port $PORT"
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0
+      - key: ENVIRONMENT
+        value: production
+      - key: DATABASE_URL
+        fromDatabase:
+          name: procore-db
+          property: connectionString
+      - key: PROCORE_CLIENT_ID
+        sync: false
+      - key: PROCORE_CLIENT_SECRET
+        sync: false
+      - key: SECRET_KEY
+        generateValue: true
+      - key: PROCORE_COMPANY_ID
+        value: 4907
+    disk:
+      name: output-storage
+      mountPath: /opt/render/project/src/production/output
+      sizeGB: 1
+
+databases:
+  - name: procore-db
+    databaseName: procore_merger
+    plan: free
+    ipAllowList: []

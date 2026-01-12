@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <title>Dashboard - VanMar</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            padding: 30px;
+            max-width: 900px;
+            margin: 0 auto;
+            background: #f4f6f8;
+            color: #333;
+        }
+
+        .container {
+            background: white;
+            padding: 30px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.05);
+            margin-bottom: 30px;
+        }
+
+        h1,
+        h2,
+        h3 {
+            margin-top: 0;
+            color: #2c3e50;
+        }
+
+        select,
+        input {
+            padding: 12px;
+            margin-top: 8px;
+            width: 100%;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            font-size: 16px;
+            box-sizing: border-box;
+        }
+
+        .label {
+            font-weight: bold;
+            margin-top: 20px;
+            display: block;
+            color: #555;
+        }
+
+        .btn-add {
+            background: #6c757d;
+            color: white;
+            border: none;
+            padding: 10px;
+            width: 100%;
+            margin-top: 15px;
+            cursor: pointer;
+            border-radius: 4px;
+        }
+
+        .btn-run {
+            background: #f47b20;
+            color: white;
+            border: none;
+            padding: 15px;
+            width: 48%;
+            cursor: pointer;
+            border-radius: 4px;
+            font-weight: bold;
+            font-size: 16px;
+        }
+
+        .btn-schedule {
+            background: #3498db;
+            color: white;
+            border: none;
+            padding: 15px;
+            width: 48%;
+            cursor: pointer;
+            border-radius: 4px;
+            font-weight: bold;
+            font-size: 16px;
+        }
+
+        .action-row {
+            display: flex;
+            justify-content: space-between;
+            margin-top: 20px;
+        }
+
+        #queue-list,
+        #schedule-list {
+            list-style: none;
+            padding: 0;
+            margin-top: 15px;
+            border: 1px solid #eee;
+            border-radius: 4px;
+        }
+
+        #queue-list li,
+        #schedule-list li {
+            padding: 10px;
+            border-bottom: 1px solid #eee;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background: #fafafa;
+        }
+
+        .remove-link {
+            color: red;
+            cursor: pointer;
+            font-size: 12px;
+            font-weight: bold;
+        }
+
+        #schedule-options {
+            background: #eef7fc;
+            padding: 15px;
+            border-radius: 5px;
+            margin-top: 15px;
+            border: 1px solid #bce0fd;
+            display: none;
+        }
+
+        /* TABLE & PROGRESS */
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 15px;
+        }
+
+        th,
+        td {
+            text-align: left;
+            padding: 12px;
+            border-bottom: 1px solid #eee;
+        }
+
+        th {
+            background: #f8f9fa;
+            color: #666;
+            font-size: 14px;
+        }
+
+        .progress-container {
+            width: 100%;
+            background-color: #e0e0e0;
+            border-radius: 4px;
+            height: 16px;
+            margin-top: 5px;
+            overflow: hidden;
+        }
+
+        .progress-bar {
+            height: 100%;
+            background-color: #27ae60;
+            width: 0%;
+            transition: width 0.5s;
+        }
+
+        .progress-text {
+            font-size: 11px;
+            color: #666;
+            font-weight: bold;
+            display: block;
+            margin-bottom: 2px;
+        }
+
+        .download-btn {
+            background: #27ae60;
+            color: white;
+            text-decoration: none;
+            padding: 6px 12px;
+            border-radius: 4px;
+            font-size: 13px;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <h1>🚀 Job Manager</h1>
+        <label class="label">1. Build Your Queue</label>
+        <select id="project-select" onchange="loadDisciplines()">
+            <option value="">Loading...</option>
+        </select>
+        <div id="discipline-section" style="display:none;">
+            <label class="label">Select Disciplines</label>
+            <select id="discipline-select" multiple size="6"></select>
+            <button class="btn-add" onclick="addToQueue()">⬇️ Add to Queue</button>
+        </div>
+        <div id="queue-section" style="margin-top: 30px; display:none;">
+            <label class="label">2. Current Queue</label>
+            <ul id="queue-list"></ul>
+            <div id="schedule-options">
+                <h3>📅 Automation Settings</h3>
+                <p id="tz-display" style="font-size:12px; color:#666; margin-bottom:10px;"></p>
+                <div style="display:flex; gap:10px;">
+                    <select id="sched-day">
+                        <option value="Fri" selected>Friday</option>
+                        <option value="Mon">Monday</option>
+                    </select>
+                    <input type="time" id="sched-time" value="17:30">
+                </div>
+                <button class="btn-schedule" style="width:100%; margin-top:10px;" onclick="confirmSchedule()">✅ Save
+                    Automation</button>
+            </div>
+            <div class="action-row" id="main-actions">
+                <button class="btn-run" onclick="executeBatch()">Run Now</button>
+                <button class="btn-schedule" onclick="showScheduleOpts()">Schedule Recurring</button>
+            </div>
+        </div>
+    </div>
+    <div class="container">
+        <h2>📅 Active Automations</h2>
+        <ul id="schedule-list">
+            <li>Loading...</li>
+        </ul>
+    </div>
+    <div class="container">
+        <h2>Recent Job History</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th>Time</th>
+                    <th>Project</th>
+                    <th>Progress</th>
+                    <th>Result</th>
+                </tr>
+            </thead>
+            <tbody id="jobs-table-body"></tbody>
+        </table>
+    </div>
+    <script>
+        let jobQueue = [];
+        const userTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+
+        fetch('/api/projects').then(r => { if (r.status === 401) window.location.href = "/login"; return r.json(); })
+            .then(data => {
+                const sel = document.getElementById('project-select');
+                sel.innerHTML = '<option value="">-- Select Project --</option>';
+                if (data) data.forEach(p => sel.innerHTML += `<option value="${p.id}">${p.name}</option>`);
+            });
+
+        loadRecentJobs(); loadSchedules(); setInterval(loadRecentJobs, 2000); // Faster polling for smooth progress
+
+        function loadDisciplines() {
+            const pid = document.getElementById('project-select').value;
+            if (!pid) return;
+            document.getElementById('discipline-section').style.display = 'block';
+            fetch(`/api/disciplines?project_id=${pid}`).then(r => r.json()).then(data => {
+                const sel = document.getElementById('discipline-select');
+                sel.innerHTML = '';
+                if (data.disciplines) data.disciplines.forEach(d => sel.innerHTML += `<option value="${d}">${d}</option>`);
+            });
+        }
+        function addToQueue() {
+            const pSel = document.getElementById('project-select');
+            const dSel = document.getElementById('discipline-select');
+            const discs = Array.from(dSel.selectedOptions).map(o => o.value);
+            jobQueue.push({ project_id: parseInt(pSel.value), project_name: pSel.options[pSel.selectedIndex].text, disciplines: discs });
+            renderQueue();
+            pSel.value = ""; dSel.innerHTML = ""; document.getElementById('discipline-section').style.display = 'none';
+        }
+        function renderQueue() {
+            const list = document.getElementById('queue-list');
+            document.getElementById('queue-section').style.display = jobQueue.length ? 'block' : 'none';
+            list.innerHTML = '';
+            jobQueue.forEach((j, i) => list.innerHTML += `<li><b>${j.project_name}</b> (${j.disciplines.join(',')}) <span class="remove-link" onclick="jobQueue.splice(${i},1);renderQueue()">X</span></li>`);
+        }
+        function executeBatch() {
+            fetch('/api/start_job', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ queue: jobQueue }) })
+                .then(r => r.json()).then(() => { jobQueue = []; renderQueue(); alert("Started!"); });
+        }
+        function showScheduleOpts() {
+            document.getElementById('schedule-options').style.display = 'block';
+            document.getElementById('main-actions').style.display = 'none';
+            document.getElementById('tz-display').innerText = `Detected Timezone: ${userTimezone}`;
+        }
+        function confirmSchedule() {
+            const day = document.getElementById('sched-day').value;
+            const time = document.getElementById('sched-time').value;
+            fetch('/api/schedule_batch', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ queue: jobQueue, day: day, time: time, timezone: userTimezone })
+            }).then(r => r.json()).then(() => {
+                alert(`Saved!`); jobQueue = []; renderQueue(); document.getElementById('schedule-options').style.display = 'none'; document.getElementById('main-actions').style.display = 'flex'; loadSchedules();
+            });
+        }
+        function loadSchedules() {
+            fetch('/api/schedules').then(r => r.json()).then(data => {
+                const list = document.getElementById('schedule-list');
+                list.innerHTML = '';
+                if (!data.length) list.innerHTML = '<li style="color:#999">No active schedules.</li>';
+                data.forEach(s => {
+                    const discs = JSON.parse(s.disciplines_json).join(", ");
+                    const timeStr = `${s.day_of_week} ${s.hour.toString().padStart(2, '0')}:${s.minute.toString().padStart(2, '0')}`;
+                    list.innerHTML += `<li><span>📅 <b>${timeStr}</b> (${s.timezone}) - ${s.project_name}</span> <span class="remove-link" onclick="deleteSchedule('${s.id}')">DELETE</span></li>`;
+                });
+            });
+        }
+        function deleteSchedule(id) {
+            if (confirm("Stop this automation?")) fetch(`/api/schedule/${id}`, { method: 'DELETE' }).then(() => loadSchedules());
+        }
+
+        function loadRecentJobs() {
+            fetch('/api/recent_jobs').then(r => r.json()).then(jobs => {
+                const tbody = document.getElementById('jobs-table-body');
+                tbody.innerHTML = '';
+                jobs.forEach(j => {
+                    let actionHtml = '-';
+                    // Parse Progress
+                    let pct = j.progress || 0;
+                    let barColor = '#3498db'; // Blue
+                    let statusText = j.status.toUpperCase();
+
+                    if (j.status === 'processing') { statusText = `GENERATING ${pct}%`; }
+                    else if (j.status === 'uploading') { statusText = "UPLOADING..."; barColor = '#f39c12'; }
+                    else if (j.status === 'completed') { statusText = "SUCCESS"; barColor = '#27ae60'; pct = 100; }
+                    else if (j.status === 'failed') { statusText = "FAILED"; barColor = '#c0392b'; pct = 100; }
+
+                    if (j.status === 'completed' || j.status === 'failed') {
+                        let parts = (j.result_message || "").split("||");
+                        let link = parts[0]; let errorMsg = parts[1];
+                        if (link && !link.startsWith("/")) link = "/" + link;
+
+                        if (j.status === 'completed' && !errorMsg) {
+                            actionHtml = `<a href="${link}" target="_blank" class="download-btn">Download PDF</a>`;
+                        } else if (link) {
+                            actionHtml = `<a href="${link}" target="_blank" class="download-btn" style="background:#f39c12">Backup PDF</a> <span style="font-size:12px;color:red" title="${errorMsg}">⚠️ Upload Error</span>`;
+                        } else {
+                            actionHtml = `<span style="color:red">Failed</span>`;
+                        }
+                    }
+
+                    tbody.innerHTML += `
+                        <tr>
+                            <td style="width:15%">${new Date(j.created_at + "Z").toLocaleTimeString()}</td>
+                            <td style="width:35%"><b>${j.project_name || 'Unknown'}</b></td>
+                            <td style="width:30%">
+                                <span class="progress-text">${statusText}</span>
+                                <div class="progress-container">
+                                    <div class="progress-bar" style="width: ${pct}%; background-color:${barColor}"></div>
+                                </div>
+                            </td>
+                            <td style="width:20%">${actionHtml}</td>
+                        </tr>
+                    `;
+                });
+            });
+        }
+    </script>
+</body>
+
+</html>
