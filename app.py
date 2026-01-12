@@ -395,6 +395,9 @@ def scheduler_tick():
     try:
         active_jobs = db.query(ScheduledJob).filter(ScheduledJob.active == True).all()
         
+        if active_jobs:
+            logger.debug(f"Scheduler tick: Checking {len(active_jobs)} active schedule(s)")
+        
         jobs_to_run = []
         
         for s_job in active_jobs:
@@ -403,11 +406,15 @@ def scheduler_tick():
                 now_in_user_tz = datetime.now(user_tz)
                 current_day = now_in_user_tz.strftime("%a")
                 
+                logger.debug(f"  Schedule '{s_job.project_name}': "
+                           f"Now={current_day} {now_in_user_tz.hour:02d}:{now_in_user_tz.minute:02d}, "
+                           f"Target={s_job.day_of_week} {s_job.hour:02d}:{s_job.minute:02d}")
+                
                 if (current_day == s_job.day_of_week and
                     now_in_user_tz.hour == s_job.hour and
                     now_in_user_tz.minute == s_job.minute):
                     
-                    logger.info(f"Triggering scheduled job: {s_job.project_name} (Timezone: {s_job.timezone})")
+                    logger.info(f"✅ Triggering scheduled job: {s_job.project_name} (Timezone: {s_job.timezone})")
                     jobs_to_run.append(s_job)
                     
             except Exception as e:

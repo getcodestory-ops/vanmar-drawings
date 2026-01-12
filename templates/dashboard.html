@@ -189,6 +189,10 @@
         </select>
         <div id="discipline-section" style="display:none;">
             <label class="label">Select Disciplines</label>
+            <div style="display: flex; gap: 10px; margin-bottom: 8px;">
+                <button class="btn-add" onclick="selectAllDisciplines()" style="width: auto; padding: 8px 16px; margin-top: 0;">Select All</button>
+                <button class="btn-add" onclick="deselectAllDisciplines()" style="width: auto; padding: 8px 16px; margin-top: 0; background: #6c757d;">Deselect All</button>
+            </div>
             <select id="discipline-select" multiple size="6"></select>
             <button class="btn-add" onclick="addToQueue()">⬇️ Add to Queue</button>
         </div>
@@ -200,8 +204,13 @@
                 <p id="tz-display" style="font-size:12px; color:#666; margin-bottom:10px;"></p>
                 <div style="display:flex; gap:10px;">
                     <select id="sched-day">
-                        <option value="Fri" selected>Friday</option>
                         <option value="Mon">Monday</option>
+                        <option value="Tue">Tuesday</option>
+                        <option value="Wed">Wednesday</option>
+                        <option value="Thu">Thursday</option>
+                        <option value="Fri" selected>Friday</option>
+                        <option value="Sat">Saturday</option>
+                        <option value="Sun">Sunday</option>
                     </select>
                     <input type="time" id="sched-time" value="17:30">
                 </div>
@@ -247,15 +256,54 @@
 
         loadRecentJobs(); loadSchedules(); setInterval(loadRecentJobs, 2000); // Faster polling for smooth progress
 
+        function selectAllDisciplines() {
+            const sel = document.getElementById('discipline-select');
+            if (sel.disabled) return;
+            for (let i = 0; i < sel.options.length; i++) {
+                if (!sel.options[i].disabled) {
+                    sel.options[i].selected = true;
+                }
+            }
+        }
+
+        function deselectAllDisciplines() {
+            const sel = document.getElementById('discipline-select');
+            if (sel.disabled) return;
+            for (let i = 0; i < sel.options.length; i++) {
+                sel.options[i].selected = false;
+            }
+        }
+
         function loadDisciplines() {
             const pid = document.getElementById('project-select').value;
-            if (!pid) return;
+            if (!pid) {
+                document.getElementById('discipline-section').style.display = 'none';
+                return;
+            }
             document.getElementById('discipline-section').style.display = 'block';
-            fetch(`/api/disciplines?project_id=${pid}`).then(r => r.json()).then(data => {
-                const sel = document.getElementById('discipline-select');
-                sel.innerHTML = '';
-                if (data.disciplines) data.disciplines.forEach(d => sel.innerHTML += `<option value="${d}">${d}</option>`);
-            });
+            const sel = document.getElementById('discipline-select');
+            sel.innerHTML = '<option disabled style="color: #999; text-align: center;">⏳ Loading disciplines...</option>';
+            sel.disabled = true;
+            
+            fetch(`/api/disciplines?project_id=${pid}`)
+                .then(r => {
+                    if (!r.ok) throw new Error('Failed to load disciplines');
+                    return r.json();
+                })
+                .then(data => {
+                    sel.disabled = false;
+                    sel.innerHTML = '';
+                    if (data.disciplines && data.disciplines.length > 0) {
+                        data.disciplines.forEach(d => sel.innerHTML += `<option value="${d}">${d}</option>`);
+                    } else {
+                        sel.innerHTML = '<option disabled style="color: #999;">No disciplines found</option>';
+                    }
+                })
+                .catch(error => {
+                    sel.disabled = false;
+                    sel.innerHTML = '<option disabled style="color: #c0392b;">❌ Error loading disciplines. Please try again.</option>';
+                    console.error('Error loading disciplines:', error);
+                });
         }
         function addToQueue() {
             const pSel = document.getElementById('project-select');
