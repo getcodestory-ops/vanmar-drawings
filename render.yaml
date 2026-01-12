@@ -24,10 +24,9 @@ services:
         generateValue: true
       - key: PROCORE_COMPANY_ID
         value: 4907
-    disk:
-      name: output-storage
-      mountPath: /opt/render/project/src/production/output
-      sizeGB: 1
+    # Note: Disks not supported on free tier - files stored in ephemeral filesystem
+    # Output files are temporary and will be deleted when service restarts
+    # To persist files, upgrade to Starter plan ($7/month) or use external storage (S3)
 
 databases:
   - name: procore-db
