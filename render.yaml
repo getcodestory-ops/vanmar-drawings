@@ -4,7 +4,7 @@ services:
     env: python
     region: oregon
     plan: free
-    buildCommand: "pip install -r production/requirements.txt"
+    buildCommand: "pip install -r requirements.txt"
     startCommand: "cd production && uvicorn app:app --host 0.0.0.0 --port $PORT"
     healthCheckPath: /health
     envVars:
