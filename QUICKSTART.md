@@ -10,7 +10,6 @@ This guide gets you from code to production in 15 minutes.
 
 ### Install Dependencies First
 ```bash
-cd production
 pip3 install -r requirements.txt
 ```
 
@@ -28,7 +27,6 @@ python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().
 
 ### Create .env File
 ```bash
-cd production
 cat > .env << EOF
 PROCORE_CLIENT_ID=your_client_id_here
 PROCORE_CLIENT_SECRET=your_client_secret_here
@@ -41,7 +39,7 @@ EOF
 
 ### Run the Application
 ```bash
-# Make sure you're in the production directory and dependencies are installed
+# From the project root directory
 uvicorn app:app --reload
 ```
 
@@ -199,7 +197,7 @@ For better performance:
 ### Essential Commands
 ```bash
 # Local development
-cd production && uvicorn app:app --reload
+uvicorn app:app --reload
 
 # Check health
 curl https://YOUR-APP-NAME.onrender.com/health
