@@ -2,168 +2,427 @@
 <html>
 
 <head>
-    <title>Dashboard - VanMar</title>
+    <title>AUTOMATION CONTROL CENTER - VanMar</title>
     <style>
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-            padding: 30px;
-            max-width: 900px;
-            margin: 0 auto;
-            background: #f4f6f8;
-            color: #333;
-        }
-
-        .container {
-            background: white;
-            padding: 30px;
-            border-radius: 8px;
-            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.05);
-            margin-bottom: 30px;
-        }
-
-        h1,
-        h2,
-        h3 {
-            margin-top: 0;
-            color: #2c3e50;
-        }
-
-        select,
-        input {
-            padding: 12px;
-            margin-top: 8px;
-            width: 100%;
-            border: 1px solid #ccc;
-            border-radius: 4px;
-            font-size: 16px;
+        * {
+            margin: 0;
+            padding: 0;
             box-sizing: border-box;
         }
 
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background: #0f0f0f;
+            color: #e0e0e0;
+            min-height: 100vh;
+            padding: 0;
+        }
+
+        /* HEADER */
+        .header {
+            background: #1a1a1a;
+            border-bottom: 1px solid #2a2a2a;
+            padding: 15px 30px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .header-left {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+        }
+
+        .logo-img {
+            height: 100px;
+            width: auto;
+            /* filter: brightness(0) invert(1); Makes logo white */
+        }
+
+        .header-title {
+            font-size: 18px;
+            font-weight: 600;
+            color: #e0e0e0;
+            letter-spacing: 0.5px;
+        }
+
+        .header-right {
+            display: flex;
+            flex-direction: column;
+            align-items: flex-end;
+            gap: 8px;
+        }
+
+        .status-indicator {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 14px;
+        }
+
+        .status-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: #27ae60;
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+
+        /* MAIN LAYOUT */
+        .main-container {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+            padding: 20px;
+            max-width: 1600px;
+            margin: 0 auto;
+        }
+
+        .panel {
+            background: #1a1a1a;
+            border: 1px solid #2a2a2a;
+            border-radius: 8px;
+            padding: 20px;
+        }
+
+        .panel-title {
+            font-size: 16px;
+            font-weight: 600;
+            margin-bottom: 15px;
+            color: #e0e0e0;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .panel-subtitle {
+            font-size: 12px;
+            color: #888;
+            margin-top: -10px;
+            margin-bottom: 15px;
+        }
+
+        /* JOB MANAGER - LEFT COLUMN */
+        .job-manager {
+            grid-column: 1;
+            grid-row: 1 / 3;
+        }
+
+        select,
+        input[type="time"] {
+            background: #2a2a2a;
+            border: 1px solid #3a3a3a;
+            color: #e0e0e0;
+            padding: 12px;
+            border-radius: 6px;
+            font-size: 14px;
+            width: 100%;
+            margin-top: 8px;
+        }
+
+        select:focus,
+        input:focus {
+            outline: none;
+            border-color: #27ae60;
+        }
+
+        select option {
+            background: #2a2a2a;
+            color: #e0e0e0;
+        }
+
         .label {
-            font-weight: bold;
+            font-weight: 600;
             margin-top: 20px;
             display: block;
-            color: #555;
+            color: #b0b0b0;
+            font-size: 13px;
         }
 
-        .btn-add {
-            background: #6c757d;
-            color: white;
+        .btn-group {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 10px;
+        }
+
+        .btn {
+            padding: 8px 16px;
             border: none;
-            padding: 10px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 13px;
+            font-weight: 500;
+            transition: all 0.2s;
+        }
+
+        .btn-secondary {
+            background: #2a2a2a;
+            color: #e0e0e0;
+            border: 1px solid #3a3a3a;
+        }
+
+        .btn-secondary:hover {
+            background: #3a3a3a;
+        }
+
+        .btn-primary {
+            background: #27ae60;
+            color: white;
+        }
+
+        .btn-primary:hover {
+            background: #229954;
+        }
+
+        .btn-large {
+            padding: 15px;
             width: 100%;
             margin-top: 15px;
-            cursor: pointer;
-            border-radius: 4px;
-        }
-
-        .btn-run {
-            background: #f47b20;
-            color: white;
-            border: none;
-            padding: 15px;
-            width: 48%;
-            cursor: pointer;
-            border-radius: 4px;
-            font-weight: bold;
             font-size: 16px;
         }
 
-        .btn-schedule {
-            background: #3498db;
-            color: white;
-            border: none;
-            padding: 15px;
-            width: 48%;
+        #discipline-select {
+            background: #2a2a2a;
+            border: 1px solid #3a3a3a;
+            color: #e0e0e0;
+            border-radius: 6px;
+            padding: 8px;
+            min-height: 150px;
+        }
+
+        #queue-list {
+            list-style: none;
+            margin-top: 15px;
+        }
+
+        #queue-list li {
+            background: #2a2a2a;
+            padding: 12px;
+            border-radius: 6px;
+            margin-bottom: 8px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border: 1px solid #3a3a3a;
+        }
+
+        .remove-link {
+            color: #e74c3c;
             cursor: pointer;
-            border-radius: 4px;
             font-weight: bold;
-            font-size: 16px;
+            padding: 4px 8px;
+            border-radius: 4px;
+        }
+
+        .remove-link:hover {
+            background: #3a1a1a;
+        }
+
+        #schedule-options {
+            background: #252525;
+            padding: 15px;
+            border-radius: 6px;
+            margin-top: 15px;
+            border: 1px solid #3a3a3a;
+            display: none;
         }
 
         .action-row {
             display: flex;
-            justify-content: space-between;
-            margin-top: 20px;
-        }
-
-        #queue-list,
-        #schedule-list {
-            list-style: none;
-            padding: 0;
+            gap: 10px;
             margin-top: 15px;
-            border: 1px solid #eee;
-            border-radius: 4px;
         }
 
-        #queue-list li,
-        #schedule-list li {
-            padding: 10px;
-            border-bottom: 1px solid #eee;
-            display: flex;
-            justify-content: space-between;
+        /* ACTIVE AUTOMATIONS - TOP RIGHT */
+        .automations-panel {
+            grid-column: 2;
+            grid-row: 1;
+        }
+
+        .live-indicator {
+            display: inline-flex;
             align-items: center;
-            background: #fafafa;
+            gap: 6px;
+            margin-left: auto;
         }
 
-        .remove-link {
-            color: red;
-            cursor: pointer;
-            font-size: 12px;
-            font-weight: bold;
+        .live-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #e74c3c;
+            animation: pulse 1.5s infinite;
         }
 
-        #schedule-options {
-            background: #eef7fc;
+        .automation-card {
+            background: #252525;
+            border: 1px solid #3a3a3a;
+            border-radius: 6px;
             padding: 15px;
-            border-radius: 5px;
-            margin-top: 15px;
-            border: 1px solid #bce0fd;
-            display: none;
+            margin-bottom: 10px;
         }
 
-        /* TABLE & PROGRESS */
+        .automation-time {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 10px;
+            font-size: 14px;
+        }
+
+        .countdown {
+            margin-top: 10px;
+            font-size: 12px;
+            color: #888;
+        }
+
+        .countdown-bar {
+            width: 100%;
+            height: 6px;
+            background: #2a2a2a;
+            border-radius: 3px;
+            margin-top: 5px;
+            overflow: hidden;
+        }
+
+        .countdown-fill {
+            height: 100%;
+            background: #f39c12;
+            transition: width 1s;
+        }
+
+
+        /* METRICS */
+        .metrics-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 15px;
+            margin-top: 15px;
+        }
+
+        .metric-card {
+            background: #252525;
+            border: 1px solid #3a3a3a;
+            border-radius: 6px;
+            padding: 15px;
+        }
+
+        .metric-label {
+            font-size: 12px;
+            color: #888;
+            margin-bottom: 8px;
+        }
+
+        .metric-value {
+            font-size: 24px;
+            font-weight: bold;
+            color: #27ae60;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .metric-trend {
+            font-size: 11px;
+            color: #27ae60;
+            margin-top: 5px;
+        }
+
+        /* SYSTEM CONSOLE */
+        .console-panel {
+            grid-column: 2;
+            grid-row: 2;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+
+        .console {
+            background: #0f0f0f;
+            border: 1px solid #2a2a2a;
+            border-radius: 6px;
+            padding: 15px;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+            max-height: 250px;
+            overflow-y: auto;
+        }
+
+        .console-line {
+            margin-bottom: 8px;
+            display: flex;
+            gap: 10px;
+        }
+
+        .console-time {
+            color: #666;
+        }
+
+        .console-info {
+            color: #3498db;
+        }
+
+        .console-warn {
+            color: #f39c12;
+        }
+
+        .console-success {
+            color: #27ae60;
+        }
+
+        /* JOB HISTORY */
+        .history-panel {
+            grid-column: 1 / 3;
+            grid-row: 3;
+        }
+
         table {
             width: 100%;
             border-collapse: collapse;
             margin-top: 15px;
         }
 
-        th,
-        td {
-            text-align: left;
+        th {
+            background: #252525;
+            color: #b0b0b0;
             padding: 12px;
-            border-bottom: 1px solid #eee;
+            text-align: left;
+            font-size: 12px;
+            font-weight: 600;
+            border-bottom: 1px solid #3a3a3a;
         }
 
-        th {
-            background: #f8f9fa;
-            color: #666;
-            font-size: 14px;
+        td {
+            padding: 12px;
+            border-bottom: 1px solid #2a2a2a;
+            font-size: 13px;
         }
 
         .progress-container {
             width: 100%;
-            background-color: #e0e0e0;
+            background: #2a2a2a;
             border-radius: 4px;
-            height: 16px;
+            height: 8px;
             margin-top: 5px;
             overflow: hidden;
         }
 
         .progress-bar {
             height: 100%;
-            background-color: #27ae60;
-            width: 0%;
+            background: #27ae60;
             transition: width 0.5s;
         }
 
         .progress-text {
             font-size: 11px;
-            color: #666;
-            font-weight: bold;
-            display: block;
-            margin-bottom: 2px;
+            color: #b0b0b0;
+            font-weight: 600;
         }
 
         .download-btn {
@@ -172,89 +431,244 @@
             text-decoration: none;
             padding: 6px 12px;
             border-radius: 4px;
-            font-size: 13px;
+            font-size: 12px;
+            display: inline-block;
+        }
+
+        .download-btn:hover {
+            background: #229954;
+        }
+
+        .history-footer {
+            margin-top: 15px;
+            font-size: 12px;
+            color: #666;
+            text-align: center;
+        }
+
+        /* FOOTER */
+        .footer {
+            background: #1a1a1a;
+            border-top: 1px solid #2a2a2a;
+            padding: 20px 30px;
+            margin-top: 40px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 12px;
+            color: #666;
+        }
+
+        .footer-links {
+            display: flex;
+            gap: 20px;
+        }
+
+        .footer-links a {
+            color: #888;
+            text-decoration: none;
+        }
+
+        .footer-links a:hover {
+            color: #27ae60;
+        }
+
+        .theme-toggle {
+            cursor: pointer;
+            font-size: 18px;
+        }
+
+        /* RESPONSIVE */
+        @media (max-width: 1200px) {
+            .main-container {
+                grid-template-columns: 1fr;
+            }
+            .job-manager {
+                grid-row: 1;
+            }
+            .automations-panel {
+                grid-column: 1;
+                grid-row: 2;
+            }
+            .console-panel {
+                grid-column: 1;
+                grid-row: 3;
+            }
+            .history-panel {
+                grid-column: 1;
+                grid-row: 4;
+            }
         }
     </style>
 </head>
 
 <body>
-    <div style="text-align: center; margin-bottom: 30px;">
-        <img src="/static/vanmar-logo.jpg" alt="VanMar Constructors Inc." style="max-width: 300px; margin-bottom: 10px;">
-    </div>
-    <div class="container">
-        <h1>🚀 Job Manager</h1>
-        <label class="label">1. Build Your Queue</label>
-        <select id="project-select" onchange="loadDisciplines()">
-            <option value="">Loading...</option>
-        </select>
-        <div id="discipline-section" style="display:none;">
-            <label class="label">Select Disciplines</label>
-            <div style="display: flex; gap: 10px; margin-bottom: 8px;">
-                <button class="btn-add" onclick="selectAllDisciplines()" style="width: auto; padding: 8px 16px; margin-top: 0;">Select All</button>
-                <button class="btn-add" onclick="deselectAllDisciplines()" style="width: auto; padding: 8px 16px; margin-top: 0; background: #6c757d;">Deselect All</button>
-            </div>
-            <select id="discipline-select" multiple size="6"></select>
-            <button class="btn-add" onclick="addToQueue()">⬇️ Add to Queue</button>
+    <!-- HEADER -->
+    <div class="header">
+        <div class="header-left">
+            <img src="/static/vanmar-logo.png" alt="VanMar Constructors Inc." class="logo-img">
         </div>
-        <div id="queue-section" style="margin-top: 30px; display:none;">
-            <label class="label">2. Current Queue</label>
-            <ul id="queue-list"></ul>
-            <div id="schedule-options">
-                <h3>📅 Automation Settings</h3>
-                <p id="tz-display" style="font-size:12px; color:#666; margin-bottom:10px;"></p>
-                <div style="display:flex; gap:10px;">
-                    <select id="sched-day">
-                        <option value="Mon">Monday</option>
-                        <option value="Tue">Tuesday</option>
-                        <option value="Wed">Wednesday</option>
-                        <option value="Thu">Thursday</option>
-                        <option value="Fri" selected>Friday</option>
-                        <option value="Sat">Saturday</option>
-                        <option value="Sun">Sunday</option>
-                    </select>
-                    <input type="time" id="sched-time" value="17:30">
+        <div class="header-right">
+            <div class="header-title">DRAWINGS MERGER APPLICATION</div>
+            <div class="status-indicator">
+                <div class="status-dot"></div>
+                <span style="font-size: 10px;">OPERATIONAL</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- MAIN CONTENT -->
+    <div class="main-container">
+        <!-- JOB MANAGER -->
+        <div class="panel job-manager">
+            <div class="panel-title">🚀 JOB MANAGER</div>
+            <div class="panel-subtitle">v2.4.0-PRO</div>
+            
+            <label class="label">1. BUILD YOUR QUEUE</label>
+            <select id="project-select" onchange="loadDisciplines()">
+                <option value="">-- Select Project --</option>
+            </select>
+            
+            <div id="discipline-section" style="display:none;">
+                <label class="label">Select Disciplines</label>
+                <div class="btn-group">
+                    <button class="btn btn-secondary" onclick="selectAllDisciplines()">Select All</button>
+                    <button class="btn btn-secondary" onclick="deselectAllDisciplines()">Deselect All</button>
                 </div>
-                <button class="btn-schedule" style="width:100%; margin-top:10px;" onclick="confirmSchedule()">✅ Save
-                    Automation</button>
+                <select id="discipline-select" multiple size="6"></select>
+                <button class="btn btn-primary" onclick="addToQueue()">⬇️ Add to Queue</button>
             </div>
-            <div class="action-row" id="main-actions">
-                <button class="btn-run" onclick="executeBatch()">Run Now</button>
-                <button class="btn-schedule" onclick="showScheduleOpts()">Schedule Recurring</button>
+            
+            <div id="queue-section" style="margin-top: 20px; display:none;">
+                <label class="label">2. CURRENT QUEUE</label>
+                <ul id="queue-list"></ul>
+                
+                <div id="schedule-options">
+                    <h3 style="margin-bottom: 10px; font-size: 14px;">📅 Automation Settings</h3>
+                    <p id="tz-display" style="font-size:11px; color:#888; margin-bottom:10px;"></p>
+                    <div style="display:flex; gap:10px;">
+                        <select id="sched-day">
+                            <option value="Mon">Monday</option>
+                            <option value="Tue">Tuesday</option>
+                            <option value="Wed">Wednesday</option>
+                            <option value="Thu">Thursday</option>
+                            <option value="Fri" selected>Friday</option>
+                            <option value="Sat">Saturday</option>
+                            <option value="Sun">Sunday</option>
+                        </select>
+                        <input type="time" id="sched-time" value="17:30">
+                    </div>
+                    <button class="btn btn-primary btn-large" onclick="confirmSchedule()">✅ Save Automation</button>
+                </div>
+                
+                <div class="action-row" id="main-actions">
+                    <button class="btn btn-primary" style="flex: 1;" onclick="executeBatch()">► Run Now</button>
+                    <button class="btn btn-secondary" style="flex: 1;" onclick="showScheduleOpts()">📅 Schedule</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- ACTIVE AUTOMATIONS -->
+        <div class="panel automations-panel">
+            <div class="panel-title">
+                🗓️ ACTIVE AUTOMATIONS
+                <span class="live-indicator">
+                    <span class="live-dot"></span>
+                    <span style="font-size: 11px; color: #e74c3c;">• LIVE</span>
+                </span>
+            </div>
+            <div id="schedule-list">
+                <div style="color:#666; text-align:center; padding:20px;">Loading...</div>
+            </div>
+        </div>
+
+
+        <!-- SYSTEM CONSOLE -->
+        <div class="panel console-panel">
+            <div class="panel-title"><> SYSTEM CONSOLE</div>
+            <div class="console" id="console">
+                <div class="console-line">
+                    <span class="console-time">[14:48:01]</span>
+                    <span class="console-info">INFO:</span>
+                    <span>Initializing document parsing engine...</span>
+                </div>
+                <div class="console-line">
+                    <span class="console-time">[14:48:05]</span>
+                    <span class="console-info">INFO:</span>
+                    <span>Connecting to Procore API...</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- RECENT JOB HISTORY -->
+        <div class="panel history-panel">
+            <div class="panel-title">🕒 RECENT JOB HISTORY</div>
+            <table>
+                <thead>
+                    <tr>
+                        <th>TIME</th>
+                        <th>PROJECT</th>
+                        <th>PROGRESS</th>
+                        <th>RESULT</th>
+                    </tr>
+                </thead>
+                <tbody id="jobs-table-body"></tbody>
+            </table>
+            <div class="history-footer">
+                <span id="history-count">SHOWING 0 OF 0 RECORDS</span>
             </div>
         </div>
     </div>
-    <div class="container">
-        <h2>📅 Active Automations</h2>
-        <ul id="schedule-list">
-            <li>Loading...</li>
-        </ul>
+
+    <!-- FOOTER -->
+    <div class="footer">
+        <div>INTERNAL USE ONLY © 2024 VANMAR CONSTRUCTORS INC.</div>
     </div>
-    <div class="container">
-        <h2>Recent Job History</h2>
-        <table>
-            <thead>
-                <tr>
-                    <th>Time</th>
-                    <th>Project</th>
-                    <th>Progress</th>
-                    <th>Result</th>
-                </tr>
-            </thead>
-            <tbody id="jobs-table-body"></tbody>
-        </table>
-    </div>
+
     <script>
         let jobQueue = [];
         const userTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+        let consoleLines = [];
 
-        fetch('/api/projects').then(r => { if (r.status === 401) window.location.href = "/login"; return r.json(); })
-            .then(data => {
-                const sel = document.getElementById('project-select');
-                sel.innerHTML = '<option value="">-- Select Project --</option>';
-                if (data) data.forEach(p => sel.innerHTML += `<option value="${p.id}">${p.name}</option>`);
+        // Initialize
+        fetch('/api/projects').then(r => { 
+            if (r.status === 401) window.location.href = "/login"; 
+            return r.json(); 
+        }).then(data => {
+            const sel = document.getElementById('project-select');
+            sel.innerHTML = '<option value="">-- Select Project --</option>';
+            if (data) data.forEach(p => sel.innerHTML += `<option value="${p.id}">${p.name}</option>`);
+        });
+
+        loadRecentJobs(); 
+        loadSchedules(); 
+        setInterval(loadRecentJobs, 2000);
+
+        function addConsoleLog(message, type = 'info') {
+            const now = new Date();
+            const timeStr = now.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+            const console = document.getElementById('console');
+            const line = document.createElement('div');
+            line.className = 'console-line';
+            line.innerHTML = `
+                <span class="console-time">[${timeStr}]</span>
+                <span class="console-${type}">${type.toUpperCase()}:</span>
+                <span>${message}</span>
+            `;
+            console.appendChild(line);
+            console.scrollTop = console.scrollHeight;
+            consoleLines.push({ time: timeStr, type, message });
+            if (consoleLines.length > 50) {
+                consoleLines.shift();
+                console.removeChild(console.firstChild);
+            }
+        }
+
+        function updateHistoryCount() {
+            fetch('/api/recent_jobs').then(r => r.json()).then(jobs => {
+                document.getElementById('history-count').textContent = `SHOWING ${Math.min(jobs.length, 10)} OF ${jobs.length} RECORDS`;
             });
-
-        loadRecentJobs(); loadSchedules(); setInterval(loadRecentJobs, 2000); // Faster polling for smooth progress
+        }
 
         function selectAllDisciplines() {
             const sel = document.getElementById('discipline-select');
@@ -282,7 +696,7 @@
             }
             document.getElementById('discipline-section').style.display = 'block';
             const sel = document.getElementById('discipline-select');
-            sel.innerHTML = '<option disabled style="color: #999; text-align: center;">⏳ Loading disciplines...</option>';
+            sel.innerHTML = '<option disabled style="color: #666; text-align: center;">⏳ Loading disciplines...</option>';
             sel.disabled = true;
             
             fetch(`/api/disciplines?project_id=${pid}`)
@@ -295,111 +709,263 @@
                     sel.innerHTML = '';
                     if (data.disciplines && data.disciplines.length > 0) {
                         data.disciplines.forEach(d => sel.innerHTML += `<option value="${d}">${d}</option>`);
+                        addConsoleLog(`Loaded ${data.disciplines.length} disciplines`, 'info');
                     } else {
-                        sel.innerHTML = '<option disabled style="color: #999;">No disciplines found</option>';
+                        sel.innerHTML = '<option disabled style="color: #666;">No disciplines found</option>';
                     }
                 })
                 .catch(error => {
                     sel.disabled = false;
-                    sel.innerHTML = '<option disabled style="color: #c0392b;">❌ Error loading disciplines. Please try again.</option>';
-                    console.error('Error loading disciplines:', error);
+                    sel.innerHTML = '<option disabled style="color: #e74c3c;">❌ Error loading disciplines</option>';
+                    addConsoleLog('Failed to load disciplines', 'warn');
                 });
         }
+
         function addToQueue() {
             const pSel = document.getElementById('project-select');
             const dSel = document.getElementById('discipline-select');
             const discs = Array.from(dSel.selectedOptions).map(o => o.value);
-            jobQueue.push({ project_id: parseInt(pSel.value), project_name: pSel.options[pSel.selectedIndex].text, disciplines: discs });
+            if (discs.length === 0) {
+                addConsoleLog('No disciplines selected', 'warn');
+                return;
+            }
+            jobQueue.push({ 
+                project_id: parseInt(pSel.value), 
+                project_name: pSel.options[pSel.selectedIndex].text, 
+                disciplines: discs 
+            });
             renderQueue();
-            pSel.value = ""; dSel.innerHTML = ""; document.getElementById('discipline-section').style.display = 'none';
+            pSel.value = ""; 
+            dSel.innerHTML = ""; 
+            document.getElementById('discipline-section').style.display = 'none';
+            addConsoleLog(`Added ${pSel.options[pSel.selectedIndex].text} to queue`, 'success');
         }
+
         function renderQueue() {
             const list = document.getElementById('queue-list');
             document.getElementById('queue-section').style.display = jobQueue.length ? 'block' : 'none';
             list.innerHTML = '';
-            jobQueue.forEach((j, i) => list.innerHTML += `<li><b>${j.project_name}</b> (${j.disciplines.join(',')}) <span class="remove-link" onclick="jobQueue.splice(${i},1);renderQueue()">X</span></li>`);
+            jobQueue.forEach((j, i) => {
+                const li = document.createElement('li');
+                li.innerHTML = `<span><b>${j.project_name}</b> (${j.disciplines.join(', ')})</span> <span class="remove-link" onclick="jobQueue.splice(${i},1);renderQueue()">DELETE</span>`;
+                list.appendChild(li);
+            });
         }
+
         function executeBatch() {
-            fetch('/api/start_job', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ queue: jobQueue }) })
-                .then(r => r.json()).then(() => { jobQueue = []; renderQueue(); alert("Started!"); });
+            if (jobQueue.length === 0) {
+                addConsoleLog('Queue is empty', 'warn');
+                return;
+            }
+            addConsoleLog(`Starting batch job with ${jobQueue.length} project(s)`, 'info');
+            fetch('/api/start_job', { 
+                method: 'POST', 
+                headers: { 'Content-Type': 'application/json' }, 
+                body: JSON.stringify({ queue: jobQueue }) 
+            }).then(r => r.json()).then(() => { 
+                jobQueue = []; 
+                renderQueue(); 
+                addConsoleLog('Batch job initiated successfully', 'success');
+            }).catch(err => {
+                addConsoleLog('Failed to start batch job', 'warn');
+            });
         }
+
         function showScheduleOpts() {
+            if (jobQueue.length === 0) {
+                addConsoleLog('Build queue first before scheduling', 'warn');
+                return;
+            }
             document.getElementById('schedule-options').style.display = 'block';
             document.getElementById('main-actions').style.display = 'none';
             document.getElementById('tz-display').innerText = `Detected Timezone: ${userTimezone}`;
         }
+
         function confirmSchedule() {
             const day = document.getElementById('sched-day').value;
             const time = document.getElementById('sched-time').value;
             fetch('/api/schedule_batch', {
-                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                method: 'POST', 
+                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ queue: jobQueue, day: day, time: time, timezone: userTimezone })
             }).then(r => r.json()).then(() => {
-                alert(`Saved!`); jobQueue = []; renderQueue(); document.getElementById('schedule-options').style.display = 'none'; document.getElementById('main-actions').style.display = 'flex'; loadSchedules();
+                addConsoleLog(`Scheduled automation for ${day} ${time}`, 'success');
+                jobQueue = []; 
+                renderQueue(); 
+                document.getElementById('schedule-options').style.display = 'none'; 
+                document.getElementById('main-actions').style.display = 'flex'; 
+                loadSchedules();
+            }).catch(err => {
+                addConsoleLog('Failed to create schedule', 'warn');
             });
         }
+
         function loadSchedules() {
             fetch('/api/schedules').then(r => r.json()).then(data => {
                 const list = document.getElementById('schedule-list');
                 list.innerHTML = '';
-                if (!data.length) list.innerHTML = '<li style="color:#999">No active schedules.</li>';
+                if (!data.length) {
+                    list.innerHTML = '<div style="color:#666; text-align:center; padding:20px;">No active schedules.</div>';
+                    return;
+                }
                 data.forEach(s => {
-                    const discs = JSON.parse(s.disciplines_json).join(", ");
+                    const discs = JSON.parse(s.disciplines_json);
                     const timeStr = `${s.day_of_week} ${s.hour.toString().padStart(2, '0')}:${s.minute.toString().padStart(2, '0')}`;
-                    list.innerHTML += `<li><span>📅 <b>${timeStr}</b> (${s.timezone}) - ${s.project_name}</span> <span class="remove-link" onclick="deleteSchedule('${s.id}')">DELETE</span></li>`;
+                    const card = document.createElement('div');
+                    card.className = 'automation-card';
+                    
+                    // Calculate next run time
+                    const now = new Date();
+                    const userTz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+                    const nextRun = calculateNextRun(s.day_of_week, s.hour, s.minute, s.timezone);
+                    const timeUntil = getTimeUntil(nextRun);
+                    
+                    card.innerHTML = `
+                        <div class="automation-time">
+                            <span>🕐</span>
+                            <span><b>${timeStr}</b> (${s.timezone})</span>
+                        </div>
+                        <div style="margin-bottom: 8px; font-size: 13px;">Project: <b>${s.project_name}</b></div>
+                        <div class="countdown">
+                            NEXT RUN IN: <span id="countdown-${s.id}">${timeUntil}</span> <span style="font-size: 10px; color: #666;">(DD:HH:MM:SS)</span>
+                            <div class="countdown-bar">
+                                <div class="countdown-fill" id="bar-${s.id}" style="width: 0%"></div>
+                            </div>
+                        </div>
+                        <button class="remove-link" onclick="deleteSchedule('${s.id}')" style="margin-top: 10px; display: block;">DELETE</button>
+                    `;
+                    list.appendChild(card);
+                    
+                    // Update countdown
+                    updateCountdown(s.id, nextRun);
                 });
             });
         }
+
+        function calculateNextRun(dayOfWeek, hour, minute, timezone) {
+            const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+            const today = new Date();
+            const currentDay = days[today.getDay() === 0 ? 6 : today.getDay() - 1];
+            const targetDayIndex = days.indexOf(dayOfWeek);
+            const currentDayIndex = days.indexOf(currentDay);
+            
+            let daysUntil = targetDayIndex - currentDayIndex;
+            if (daysUntil < 0) daysUntil += 7;
+            if (daysUntil === 0) {
+                const now = new Date();
+                const targetTime = new Date(now);
+                targetTime.setHours(hour, minute, 0, 0);
+                if (targetTime <= now) daysUntil = 7;
+            }
+            
+            const nextRun = new Date();
+            nextRun.setDate(nextRun.getDate() + daysUntil);
+            nextRun.setHours(hour, minute, 0, 0);
+            return nextRun;
+        }
+
+        function getTimeUntil(targetDate) {
+            const now = new Date();
+            const diff = targetDate - now;
+            if (diff < 0) return '00:00:00:00';
+            const days = Math.floor(diff / (24 * 3600000));
+            const hours = Math.floor((diff % (24 * 3600000)) / 3600000);
+            const minutes = Math.floor((diff % 3600000) / 60000);
+            const seconds = Math.floor((diff % 60000) / 1000);
+            return `${days.toString().padStart(2, '0')}:${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+        }
+
+        function updateCountdown(scheduleId, targetDate) {
+            const now = new Date();
+            const diff = targetDate - now;
+            const totalDay = 7 * 24 * 60 * 60 * 1000;
+            const percent = Math.max(0, Math.min(100, 100 - (diff / totalDay * 100)));
+            
+            const countdownEl = document.getElementById(`countdown-${scheduleId}`);
+            const barEl = document.getElementById(`bar-${scheduleId}`);
+            if (countdownEl) countdownEl.textContent = getTimeUntil(targetDate);
+            if (barEl) barEl.style.width = `${percent}%`;
+        }
+
+        setInterval(() => {
+            fetch('/api/schedules').then(r => r.json()).then(data => {
+                data.forEach(s => {
+                    const nextRun = calculateNextRun(s.day_of_week, s.hour, s.minute, s.timezone);
+                    updateCountdown(s.id, nextRun);
+                });
+            });
+        }, 1000);
+
         function deleteSchedule(id) {
-            if (confirm("Stop this automation?")) fetch(`/api/schedule/${id}`, { method: 'DELETE' }).then(() => loadSchedules());
+            if (confirm("Stop this automation?")) {
+                fetch(`/api/schedule/${id}`, { method: 'DELETE' }).then(() => {
+                    loadSchedules();
+                    addConsoleLog('Automation deleted', 'info');
+                });
+            }
         }
 
         function loadRecentJobs() {
             fetch('/api/recent_jobs').then(r => r.json()).then(jobs => {
                 const tbody = document.getElementById('jobs-table-body');
                 tbody.innerHTML = '';
-                jobs.forEach(j => {
+                jobs.slice(0, 10).forEach(j => {
                     let actionHtml = '-';
-                    // Parse Progress
                     let pct = j.progress || 0;
-                    let barColor = '#3498db'; // Blue
+                    let barColor = '#3498db';
                     let statusText = j.status.toUpperCase();
 
-                    if (j.status === 'processing') { statusText = `GENERATING ${pct}%`; }
-                    else if (j.status === 'uploading') { statusText = "UPLOADING..."; barColor = '#f39c12'; }
-                    else if (j.status === 'completed') { statusText = "SUCCESS"; barColor = '#27ae60'; pct = 100; }
-                    else if (j.status === 'failed') { statusText = "FAILED"; barColor = '#c0392b'; pct = 100; }
+                    if (j.status === 'processing') { 
+                        statusText = `GENERATING ${pct}%`; 
+                    } else if (j.status === 'uploading') { 
+                        statusText = "UPLOADING..."; 
+                        barColor = '#f39c12'; 
+                    } else if (j.status === 'completed') { 
+                        statusText = "SUCCESS"; 
+                        barColor = '#27ae60'; 
+                        pct = 100; 
+                    } else if (j.status === 'failed') { 
+                        statusText = "FAILED"; 
+                        barColor = '#e74c3c'; 
+                        pct = 100; 
+                    }
 
                     if (j.status === 'completed' || j.status === 'failed') {
                         let parts = (j.result_message || "").split("||");
-                        let link = parts[0]; let errorMsg = parts[1];
+                        let link = parts[0]; 
+                        let errorMsg = parts[1];
                         if (link && !link.startsWith("/")) link = "/" + link;
 
                         if (j.status === 'completed' && !errorMsg) {
-                            actionHtml = `<a href="${link}" target="_blank" class="download-btn">Download PDF</a>`;
+                            actionHtml = `<a href="${link}" target="_blank" class="download-btn">⬇️ PDF</a>`;
                         } else if (link) {
-                            actionHtml = `<a href="${link}" target="_blank" class="download-btn" style="background:#f39c12">Backup PDF</a> <span style="font-size:12px;color:red" title="${errorMsg}">⚠️ Upload Error</span>`;
+                            actionHtml = `<a href="${link}" target="_blank" class="download-btn" style="background:#f39c12">⬇️ PDF</a> <span style="font-size:11px;color:#e74c3c" title="${errorMsg}">⚠️</span>`;
                         } else {
-                            actionHtml = `<span style="color:red">Failed</span>`;
+                            actionHtml = `<span style="color:#e74c3c">Failed</span>`;
                         }
                     }
 
-                    tbody.innerHTML += `
-                        <tr>
-                            <td style="width:15%">${new Date(j.created_at + "Z").toLocaleTimeString()}</td>
-                            <td style="width:35%"><b>${j.project_name || 'Unknown'}</b></td>
-                            <td style="width:30%">
-                                <span class="progress-text">${statusText}</span>
-                                <div class="progress-container">
-                                    <div class="progress-bar" style="width: ${pct}%; background-color:${barColor}"></div>
-                                </div>
-                            </td>
-                            <td style="width:20%">${actionHtml}</td>
-                        </tr>
+                    const tr = document.createElement('tr');
+                    tr.innerHTML = `
+                        <td style="width:12%">${new Date(j.created_at + "Z").toLocaleTimeString()}</td>
+                        <td style="width:30%"><b>${j.project_name || 'Unknown'}</b></td>
+                        <td style="width:35%">
+                            <span class="progress-text">${statusText} ${pct}%</span>
+                            <div class="progress-container">
+                                <div class="progress-bar" style="width: ${pct}%; background-color:${barColor}"></div>
+                            </div>
+                        </td>
+                        <td style="width:23%">${actionHtml}</td>
                     `;
+                    tbody.appendChild(tr);
                 });
+                updateHistoryCount();
             });
         }
+
+        // Initial console messages
+        addConsoleLog('System initialized', 'success');
+        addConsoleLog('Ready for automation tasks', 'info');
     </script>
 </body>
 
