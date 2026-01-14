@@ -3,8 +3,9 @@ import uuid
 import time
 import asyncio
 import json
+import base64
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, BackgroundTasks, Depends, Cookie, HTTPException, status
@@ -58,6 +59,10 @@ cipher_suite = Fernet(settings.get_encryption_key())
 # Rate limiting
 limiter = Limiter(key_func=get_remote_address)
 
+# Job cancellation tracking
+# Maps job_id -> cancellation event
+job_cancellation_events: Dict[str, asyncio.Event] = {}
+
 
 # ---------------------------------------------------------
 # DATABASE MODELS
@@ -66,7 +71,7 @@ limiter = Limiter(key_func=get_remote_address)
 class Job(Base):
     __tablename__ = "jobs"
     id = Column(String, primary_key=True, index=True)
-    status = Column(String)  # queued, processing, uploading, completed, failed
+    status = Column(String)  # queued, processing, uploading, completed, failed, cancelled
     project_id = Column(String)
     project_name = Column(String)
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -74,6 +79,8 @@ class Job(Base):
     result_message = Column(String, nullable=True)
     progress = Column(Integer, default=0)
     error_details = Column(Text, nullable=True)
+    total_drawings = Column(Integer, nullable=True)  # Total drawings to process
+    processed_drawings = Column(Integer, default=0)  # Drawings processed so far
 
 
 class TokenStore(Base):
@@ -113,6 +120,7 @@ class SingleJobConfig(BaseModel):
     project_id: int
     project_name: str
     disciplines: List[str]
+    drawing_ids: Optional[List[int]] = None  # Optional: specific drawing IDs to process
 
     @validator('project_id')
     def validate_project_id(cls, v):
@@ -170,7 +178,6 @@ class HealthResponse(BaseModel):
     environment: str
     version: str = "1.0.0"
     redirect_uri: Optional[str] = None  # Show redirect URI for OAuth debugging
-    redirect_uri: Optional[str] = None  # Show redirect URI for OAuth debugging
 
 
 # ---------------------------------------------------------
@@ -187,6 +194,56 @@ async def lifespan(app: FastAPI):
     try:
         Base.metadata.create_all(bind=engine)
         logger.info("Database tables verified/created successfully")
+        
+        # Migrate existing database: Add new columns if they don't exist
+        with engine.begin() as conn:  # Use begin() for automatic transaction handling
+            # Check if we're using SQLite
+            if settings.DATABASE_URL.startswith("sqlite"):
+                # Check if columns exist and add them if missing
+                try:
+                    # Try to query the columns - if they don't exist, this will fail
+                    conn.execute(text("SELECT total_drawings, processed_drawings FROM jobs LIMIT 1"))
+                    logger.info("Database columns already exist")
+                except Exception:
+                    # Columns don't exist, add them
+                    logger.info("Adding new columns to jobs table...")
+                    try:
+                        conn.execute(text("ALTER TABLE jobs ADD COLUMN total_drawings INTEGER"))
+                        logger.info("Added total_drawings column")
+                    except Exception as e:
+                        logger.warning(f"Could not add total_drawings column (may already exist): {e}")
+                    
+                    try:
+                        conn.execute(text("ALTER TABLE jobs ADD COLUMN processed_drawings INTEGER DEFAULT 0"))
+                        logger.info("Added processed_drawings column")
+                    except Exception as e:
+                        logger.warning(f"Could not add processed_drawings column (may already exist): {e}")
+                    
+                    logger.info("Database migration completed successfully")
+            else:
+                # For PostgreSQL, use IF NOT EXISTS equivalent
+                try:
+                    conn.execute(text("""
+                        DO $$ 
+                        BEGIN
+                            IF NOT EXISTS (
+                                SELECT 1 FROM information_schema.columns 
+                                WHERE table_name='jobs' AND column_name='total_drawings'
+                            ) THEN
+                                ALTER TABLE jobs ADD COLUMN total_drawings INTEGER;
+                            END IF;
+                            
+                            IF NOT EXISTS (
+                                SELECT 1 FROM information_schema.columns 
+                                WHERE table_name='jobs' AND column_name='processed_drawings'
+                            ) THEN
+                                ALTER TABLE jobs ADD COLUMN processed_drawings INTEGER DEFAULT 0;
+                            END IF;
+                        END $$;
+                    """))
+                    logger.info("Database migration completed successfully (PostgreSQL)")
+                except Exception as e:
+                    logger.warning(f"Database migration check failed (columns may already exist): {e}")
         
         # Test database connection
         with engine.connect() as conn:
@@ -308,13 +365,35 @@ def get_fresh_access_token() -> Optional[str]:
 
 def process_batch_sequence(job_list: List[dict], access_token: str):
     """Process a batch of jobs sequentially."""
+    batch_start_time = time.time()
     db = SessionLocal()
     
-    for job_meta in job_list:
+    logger.info(f"═══════════════════════════════════════════════════════════")
+    logger.info(f"📋 STARTING BATCH PROCESSING")
+    logger.info(f"   Total jobs: {len(job_list)}")
+    logger.info(f"   Started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    logger.info(f"═══════════════════════════════════════════════════════════")
+    
+    for job_idx, job_meta in enumerate(job_list, start=1):
         job_id = job_meta["id"]
+        job_start_time = time.time()
+        
+        # Create cancellation event for this job
+        cancel_event = asyncio.Event()
+        job_cancellation_events[job_id] = cancel_event
         
         job_record = db.query(Job).filter(Job.id == job_id).first()
         if not job_record:
+            logger.warning(f"[{job_idx}/{len(job_list)}] Job {job_id} not found in database, skipping")
+            if job_id in job_cancellation_events:
+                del job_cancellation_events[job_id]
+            continue
+        
+        # Check if job was cancelled before starting
+        if job_record.status == "cancelled":
+            logger.info(f"[{job_idx}/{len(job_list)}] Job {job_id} was cancelled, skipping")
+            if job_id in job_cancellation_events:
+                del job_cancellation_events[job_id]
             continue
         
         job_record.status = "processing"
@@ -322,36 +401,108 @@ def process_batch_sequence(job_list: List[dict], access_token: str):
         job_record.updated_at = datetime.utcnow()
         db.commit()
         
-        logger.info(f"Starting job {job_id} for project {job_meta['project_id']}", extra={"job_id": job_id, "project_id": job_meta['project_id']})
+        logger.info(f"═══════════════════════════════════════════════════════════")
+        logger.info(f"[JOB {job_idx}/{len(job_list)}] Starting job {job_id}")
+        logger.info(f"   Project ID: {job_meta['project_id']}")
+        logger.info(f"   Project Name: {job_meta.get('project_name', 'Unknown')}")
+        logger.info(f"   Disciplines: {', '.join(job_meta.get('disciplines', []))}")
+        if job_meta.get('drawing_ids'):
+            logger.info(f"   Selected Drawings: {len(job_meta['drawing_ids'])} specific drawing(s)")
+        logger.info(f"   Started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        logger.info(f"═══════════════════════════════════════════════════════════")
         
         # Define progress callback
-        def update_db_progress(percent):
+        def update_db_progress(percent, processed=0, total=0):
             try:
                 sub_db = SessionLocal()
                 jr = sub_db.query(Job).filter(Job.id == job_id).first()
-                if jr:
+                if jr and jr.status != "cancelled":
                     jr.progress = percent
+                    if total > 0:
+                        jr.total_drawings = total
+                    if processed >= 0:
+                        jr.processed_drawings = processed
                     jr.updated_at = datetime.utcnow()
                     sub_db.commit()
+                    logger.debug(f"   Progress updated: {percent}% ({processed}/{total} drawings)")
                 sub_db.close()
             except Exception as e:
-                logger.warning(f"Could not update progress: {e}")
+                logger.warning(f"   Could not update progress: {e}")
 
         try:
-            # Run PDF generation
-            local_path = core_engine.run_job_api(
-                job_meta["project_id"],
-                job_meta["disciplines"],
-                access_token,
-                progress_callback=update_db_progress
-            )
+            max_retries = 3
+            retry_count = 0
+            local_path = None
+            
+            while retry_count < max_retries:
+                try:
+                    # Check for cancellation before starting PDF generation
+                    if cancel_event.is_set() or job_record.status == "cancelled":
+                        raise Exception("Job was cancelled")
+                    
+                    # Run PDF generation
+                    if retry_count > 0:
+                        logger.info(f"   [RETRY {retry_count}/{max_retries-1}] Regenerating PDF...")
+                    else:
+                        logger.info(f"   [PHASE 1/2] Generating PDF...")
+                    
+                    pdf_start = time.time()
+                    local_path = core_engine.run_job_api(
+                        job_meta["project_id"],
+                        job_meta["disciplines"],
+                        access_token,
+                        progress_callback=update_db_progress,
+                        drawing_ids=job_meta.get("drawing_ids")
+                    )
+                    pdf_time = time.time() - pdf_start
+                    
+                    # Check for cancellation after PDF generation
+                    if cancel_event.is_set():
+                        raise Exception("Job was cancelled during PDF generation")
+                    
+                    logger.info(f"   ✓ PDF generation complete (took {pdf_time:.2f}s)")
+                    break  # Success, exit retry loop
+                    
+                except Exception as pdf_error:
+                    retry_count += 1
+                    error_msg = str(pdf_error)
+                    
+                    # Check if it's a validation error (page count mismatch)
+                    is_validation_error = "PDF validation failed" in error_msg or ("Expected" in error_msg and "pages" in error_msg)
+                    
+                    if is_validation_error and retry_count < max_retries:
+                        logger.warning(f"   ⚠ PDF validation failed (attempt {retry_count}/{max_retries}): {error_msg}")
+                        logger.info(f"   🔄 Restarting process...")
+                        # Clean up any partial files
+                        if local_path and os.path.exists(local_path):
+                            try:
+                                os.remove(local_path)
+                                logger.debug(f"   Removed invalid PDF file")
+                            except:
+                                pass
+                        # Wait a bit before retrying
+                        time.sleep(2)
+                        continue  # Retry
+                    else:
+                        # Not a validation error, or max retries reached
+                        raise  # Re-raise the exception
+            
+            if not local_path:
+                raise Exception(f"PDF generation failed after {max_retries} attempts")
             
             # Upload phase
-            update_db_progress(95)
+            logger.info(f"   [PHASE 2/2] Uploading to Procore...")
+            update_db_progress(95, job_record.total_drawings or 0, job_record.total_drawings or 0)
+            
+            # Check for cancellation before upload
+            if cancel_event.is_set() or job_record.status == "cancelled":
+                raise Exception("Job was cancelled before upload")
+            
             job_record.status = "uploading"
             job_record.updated_at = datetime.utcnow()
             db.commit()
             
+            upload_start = time.time()
             # Upload to Procore
             upload_result = asyncio.run(
                 core_engine.handle_procore_upload(
@@ -360,6 +511,11 @@ def process_batch_sequence(job_list: List[dict], access_token: str):
                     access_token
                 )
             )
+            upload_time = time.time() - upload_start
+            
+            # Final cancellation check
+            if cancel_event.is_set():
+                raise Exception("Job was cancelled during upload")
             
             job_record.status = "completed"
             job_record.progress = 100
@@ -368,19 +524,56 @@ def process_batch_sequence(job_list: List[dict], access_token: str):
             
             if upload_result != "Success":
                 job_record.result_message += f"||{upload_result}"
+                logger.warning(f"   ⚠ Upload result: {upload_result}")
             
-            logger.info(f"Job {job_id} completed successfully", extra={"job_id": job_id})
+            job_time = time.time() - job_start_time
+            logger.info(f"   ✓ Upload complete (took {upload_time:.2f}s)")
+            logger.info(f"═══════════════════════════════════════════════════════════")
+            logger.info(f"✅ JOB {job_idx}/{len(job_list)} COMPLETED")
+            logger.info(f"   Job ID: {job_id}")
+            logger.info(f"   Total time: {job_time:.2f}s ({job_time/60:.1f} minutes)")
+            logger.info(f"   Output: {os.path.basename(local_path)}")
+            logger.info(f"═══════════════════════════════════════════════════════════")
 
         except Exception as e:
-            job_record.status = "failed"
-            job_record.error_details = str(e)
-            job_record.updated_at = datetime.utcnow()
-            logger.error(f"Job {job_id} failed: {e}", extra={"job_id": job_id}, exc_info=True)
+            job_time = time.time() - job_start_time
+            
+            # Check if it was a cancellation
+            if cancel_event.is_set() or job_record.status == "cancelled":
+                job_record.status = "cancelled"
+                job_record.error_details = "Job was cancelled by user"
+                logger.info(f"═══════════════════════════════════════════════════════════")
+                logger.info(f"🚫 JOB {job_idx}/{len(job_list)} CANCELLED after {job_time:.2f}s")
+                logger.info(f"   Job ID: {job_id}")
+                logger.info(f"═══════════════════════════════════════════════════════════")
+            else:
+                job_record.status = "failed"
+                job_record.error_details = str(e)
+                logger.error(f"═══════════════════════════════════════════════════════════")
+                logger.error(f"❌ JOB {job_idx}/{len(job_list)} FAILED after {job_time:.2f}s")
+                logger.error(f"   Job ID: {job_id}")
+                logger.error(f"   Project ID: {job_meta['project_id']}")
+                logger.error(f"   Error: {type(e).__name__}: {str(e)}")
+                logger.error(f"═══════════════════════════════════════════════════════════", exc_info=True)
         
         db.commit()
         
+        # Clean up cancellation event
+        if job_id in job_cancellation_events:
+            del job_cancellation_events[job_id]
+        
         # Rate limiting between jobs
+        if job_idx < len(job_list):
+            logger.info(f"   Waiting 5s before next job...")
         time.sleep(5)
+
+    batch_time = time.time() - batch_start_time
+    logger.info(f"═══════════════════════════════════════════════════════════")
+    logger.info(f"📋 BATCH PROCESSING COMPLETE")
+    logger.info(f"   Processed: {len(job_list)} job(s)")
+    logger.info(f"   Total time: {batch_time:.2f}s ({batch_time/60:.1f} minutes)")
+    logger.info(f"   Completed at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    logger.info(f"═══════════════════════════════════════════════════════════")
 
     db.close()
 
@@ -796,16 +989,26 @@ async def get_disciplines(request: Request, project_id: int, access_token: str =
                     break
                 page += 1
 
-            disciplines = set()
+            # Count drawings per discipline
+            discipline_counts = {}
             for dwg in all_drawings:
                 d_name = "Unknown"
                 if dwg.get("drawing_discipline"):
                     d_name = dwg["drawing_discipline"].get("name", "Unknown")
                 elif dwg.get("discipline"):
                     d_name = dwg["discipline"]
-                disciplines.add(d_name)
+                discipline_counts[d_name] = discipline_counts.get(d_name, 0) + 1
             
-            return {"area_id": area_id, "disciplines": sorted(list(disciplines))}
+            # Format disciplines with counts
+            disciplines_with_counts = [
+                {
+                    "name": disc,
+                    "count": discipline_counts[disc]
+                }
+                for disc in sorted(discipline_counts.keys())
+            ]
+            
+            return {"area_id": area_id, "disciplines": disciplines_with_counts}
         except Exception as api_error:
             logger.error(f"Procore API error fetching disciplines: {api_error}", exc_info=True)
             if hasattr(api_error, 'status') and api_error.status == 401:
@@ -830,11 +1033,140 @@ async def get_disciplines(request: Request, project_id: int, access_token: str =
         )
 
 
+@app.get("/api/drawings")
+@limiter.limit("30/minute")
+async def get_drawings(request: Request, project_id: int, discipline: str, access_token: str = Cookie(None)):
+    """Get drawings for a specific discipline."""
+    if not access_token:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    
+    try:
+        from core_engine import AsyncProcoreClient
+        from config import settings
+        
+        client = AsyncProcoreClient(access_token, settings.PROCORE_COMPANY_ID)
+        try:
+            r_area = await client.get(f"/rest/v1.1/projects/{project_id}/drawing_areas")
+            area_id = None
+            for a in r_area:
+                if a['name'].strip().upper() == "IFC":
+                    area_id = a['id']
+                    break
+            
+            if not area_id:
+                return {"error": "No 'IFC' Drawing Area found."}
+
+            endpoint = f"/rest/v1.1/drawing_areas/{area_id}/drawings"
+            all_drawings = []
+            page = 1
+            
+            while True:
+                data = await client.get(endpoint, params={"project_id": project_id, "page": page, "per_page": 100})
+                if not data:
+                    break
+                all_drawings.extend(data)
+                if len(data) < 100:
+                    break
+                page += 1
+
+            # Filter drawings by discipline
+            filtered_drawings = []
+            for dwg in all_drawings:
+                d_name = "Unknown"
+                if dwg.get("drawing_discipline"):
+                    d_name = dwg["drawing_discipline"].get("name", "Unknown")
+                elif dwg.get("discipline"):
+                    d_name = dwg["discipline"]
+                
+                if d_name == discipline:
+                    filtered_drawings.append({
+                        "id": dwg.get("id"),
+                        "number": dwg.get("number", "Unknown"),
+                        "title": dwg.get("title", ""),
+                        "revision": dwg.get("current_revision", {}).get("revision_number", "")
+                    })
+            
+            return {"drawings": filtered_drawings}
+        except Exception as api_error:
+            logger.error(f"Procore API error fetching drawings: {api_error}", exc_info=True)
+            if hasattr(api_error, 'status') and api_error.status == 401:
+                raise HTTPException(status_code=401, detail="Token expired or invalid. Please login again.")
+            raise
+        finally:
+            await client.close()
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching drawings: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to fetch drawings: {str(e)}")
+
+
 @app.get("/api/recent_jobs")
-async def get_recent_jobs(db: Session = Depends(get_db)):
-    """Get recent job history."""
-    jobs = db.query(Job).order_by(Job.created_at.desc()).limit(20).all()
-    return jobs
+async def get_recent_jobs(
+    page: int = 1,
+    per_page: int = 6,
+    db: Session = Depends(get_db)
+):
+    """Get recent job history with pagination."""
+    # Calculate offset
+    offset = (page - 1) * per_page
+    
+    # Get total count
+    total_count = db.query(Job).count()
+    
+    # Get paginated jobs
+    jobs = db.query(Job).order_by(Job.created_at.desc()).offset(offset).limit(per_page).all()
+    
+    # Calculate total pages
+    total_pages = (total_count + per_page - 1) // per_page if total_count > 0 else 1
+    
+    return {
+        "jobs": jobs,
+        "pagination": {
+            "page": page,
+            "per_page": per_page,
+            "total": total_count,
+            "total_pages": total_pages,
+            "has_next": page < total_pages,
+            "has_prev": page > 1
+        }
+    }
+
+
+@app.post("/api/cancel_job/{job_id}")
+@limiter.limit("10/minute")
+async def cancel_job(
+    request: Request,
+    job_id: str,
+    db: Session = Depends(get_db)
+):
+    """Cancel a queued or processing job."""
+    job_record = db.query(Job).filter(Job.id == job_id).first()
+    
+    if not job_record:
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    # Only allow cancelling queued or processing jobs
+    if job_record.status not in ["queued", "processing", "uploading"]:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Cannot cancel job with status '{job_record.status}'. Only queued, processing, or uploading jobs can be cancelled."
+        )
+    
+    # Set cancellation flag
+    job_record.status = "cancelled"
+    job_record.error_details = "Job was cancelled by user"
+    job_record.updated_at = datetime.utcnow()
+    db.commit()
+    
+    # Signal cancellation event if job is running
+    if job_id in job_cancellation_events:
+        job_cancellation_events[job_id].set()
+        logger.info(f"Job {job_id} cancellation signal sent")
+    
+    logger.info(f"Job {job_id} cancelled by user")
+    return {"status": "cancelled", "job_id": job_id}
 
 
 @app.post("/api/start_job")
@@ -863,7 +1195,8 @@ async def start_job(
         batch_jobs.append({
             "id": job_id,
             "project_id": item.project_id,
-            "disciplines": item.disciplines
+            "disciplines": item.disciplines,
+            "drawing_ids": item.drawing_ids if hasattr(item, 'drawing_ids') else None
         })
     
     db.commit()

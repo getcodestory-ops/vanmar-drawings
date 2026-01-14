@@ -197,6 +197,29 @@
             min-height: 150px;
         }
 
+        #discipline-select option:checked,
+        #discipline-select option[selected] {
+            background: #4CAF50 !important;
+            color: #fff !important;
+            font-weight: 600;
+        }
+
+        #drawing-select {
+            background: #2a2a2a;
+            border: 1px solid #3a3a3a;
+            color: #e0e0e0;
+            border-radius: 6px;
+            padding: 8px;
+            min-height: 200px;
+        }
+
+        #drawing-select option:checked,
+        #drawing-select option[selected] {
+            background: #4CAF50 !important;
+            color: #fff !important;
+            font-weight: 600;
+        }
+
         #queue-list {
             list-style: none;
             margin-top: 15px;
@@ -439,6 +462,22 @@
             background: #229954;
         }
 
+        .cancel-btn {
+            background: #e74c3c !important;
+            color: white !important;
+            border: none !important;
+            padding: 6px 12px !important;
+            border-radius: 4px !important;
+            cursor: pointer !important;
+            font-size: 12px !important;
+            font-weight: 600 !important;
+            transition: background 0.2s;
+        }
+
+        .cancel-btn:hover {
+            background: #c0392b !important;
+        }
+
         .history-footer {
             margin-top: 15px;
             font-size: 12px;
@@ -518,55 +557,66 @@
     </div>
 
     <!-- MAIN CONTENT -->
-    <div class="main-container">
+    <div id="main-dashboard" class="main-container">
         <!-- JOB MANAGER -->
         <div class="panel job-manager">
             <div class="panel-title">🚀 JOB MANAGER</div>
             <div class="panel-subtitle">v2.4.0-PRO</div>
             
             <label class="label">1. BUILD YOUR QUEUE</label>
-            <select id="project-select" onchange="loadDisciplines()">
+        <select id="project-select" onchange="loadDisciplines()">
                 <option value="">-- Select Project --</option>
-            </select>
+        </select>
             
-            <div id="discipline-section" style="display:none;">
-                <label class="label">Select Disciplines</label>
+        <div id="discipline-section" style="display:none;">
+            <label class="label">Select Disciplines <span id="discipline-count" style="color: #888; font-size: 11px; font-weight: normal;">(0 displayed, 0 selected)</span></label>
                 <div class="btn-group">
                     <button class="btn btn-secondary" onclick="selectAllDisciplines()">Select All</button>
                     <button class="btn btn-secondary" onclick="deselectAllDisciplines()">Deselect All</button>
+        </div>
+            <select id="discipline-select" multiple size="6" onchange="updateDisciplineCount(); loadDrawings();"></select>
+            
+            <div id="drawings-section" style="display:none; margin-top: 15px;">
+                <label class="label">Select Drawings (or leave empty for all) <span id="drawing-count" style="color: #888; font-size: 11px; font-weight: normal;">(0 displayed, 0 selected)</span></label>
+                <div class="btn-group">
+                    <button class="btn btn-secondary" onclick="selectAllDrawings()">Select All</button>
+                    <button class="btn btn-secondary" onclick="deselectAllDrawings()">Deselect All</button>
                 </div>
-                <select id="discipline-select" multiple size="6"></select>
-                <button class="btn btn-primary" onclick="addToQueue()">⬇️ Add to Queue</button>
+                <select id="drawing-select" multiple size="8" onchange="updateDrawingCount();"></select>
             </div>
+            
+            <button class="btn btn-primary" onclick="addToQueue()" style="margin-top: 15px;">⬇️ Add to Queue</button>
+        </div>
+        
             
             <div id="queue-section" style="margin-top: 20px; display:none;">
                 <label class="label">2. CURRENT QUEUE</label>
-                <ul id="queue-list"></ul>
+            <ul id="queue-list"></ul>
                 
-                <div id="schedule-options">
+            <div id="schedule-options">
                     <h3 style="margin-bottom: 10px; font-size: 14px;">📅 Automation Settings</h3>
                     <p id="tz-display" style="font-size:11px; color:#888; margin-bottom:10px;"></p>
-                    <div style="display:flex; gap:10px;">
-                        <select id="sched-day">
-                            <option value="Mon">Monday</option>
+                <div style="display:flex; gap:10px;">
+                    <select id="sched-day">
+                        <option value="Mon">Monday</option>
                             <option value="Tue">Tuesday</option>
                             <option value="Wed">Wednesday</option>
                             <option value="Thu">Thursday</option>
-                            <option value="Fri" selected>Friday</option>
+                        <option value="Fri" selected>Friday</option>
                             <option value="Sat">Saturday</option>
                             <option value="Sun">Sunday</option>
-                        </select>
-                        <input type="time" id="sched-time" value="17:30">
-                    </div>
-                    <button class="btn btn-primary btn-large" onclick="confirmSchedule()">✅ Save Automation</button>
+                    </select>
+                    <input type="time" id="sched-time" value="17:30">
                 </div>
+                    <button class="btn btn-primary btn-large" onclick="confirmSchedule()">✅ Save Automation</button>
+            </div>
                 
-                <div class="action-row" id="main-actions">
+            <div class="action-row" id="main-actions">
                     <button class="btn btn-primary" style="flex: 1;" onclick="executeBatch()">► Run Now</button>
                     <button class="btn btn-secondary" style="flex: 1;" onclick="showScheduleOpts()">📅 Schedule</button>
-                </div>
             </div>
         </div>
+    </div>
 
         <!-- ACTIVE AUTOMATIONS -->
         <div class="panel automations-panel">
@@ -576,7 +626,7 @@
                     <span class="live-dot"></span>
                     <span style="font-size: 11px; color: #e74c3c;">• LIVE</span>
                 </span>
-            </div>
+    </div>
             <div id="schedule-list">
                 <div style="color:#666; text-align:center; padding:20px;">Loading...</div>
             </div>
@@ -596,27 +646,33 @@
                     <span class="console-time">[14:48:05]</span>
                     <span class="console-info">INFO:</span>
                     <span>Connecting to Procore API...</span>
-                </div>
-            </div>
         </div>
+    </div>
+    </div>
 
         <!-- RECENT JOB HISTORY -->
         <div class="panel history-panel">
             <div class="panel-title">🕒 RECENT JOB HISTORY</div>
-            <table>
-                <thead>
-                    <tr>
+        <table>
+            <thead>
+                <tr>
                         <th>TIME</th>
                         <th>PROJECT</th>
                         <th>PROGRESS</th>
+                        <th>RUNTIME</th>
                         <th>RESULT</th>
-                    </tr>
-                </thead>
-                <tbody id="jobs-table-body"></tbody>
-            </table>
+                </tr>
+            </thead>
+            <tbody id="jobs-table-body"></tbody>
+        </table>
             <div class="history-footer">
                 <span id="history-count">SHOWING 0 OF 0 RECORDS</span>
-            </div>
+                <div id="history-pagination" style="display: none; margin-top: 10px; justify-content: space-between; align-items: center; gap: 10px;">
+                    <button id="history-prev-btn" onclick="changeHistoryPage(-1)" class="btn btn-secondary" style="padding: 5px 15px; font-size: 12px;" disabled>← Previous</button>
+                    <span id="history-page-info" style="color: #888; font-size: 12px;">Page 1 of 1</span>
+                    <button id="history-next-btn" onclick="changeHistoryPage(1)" class="btn btn-secondary" style="padding: 5px 15px; font-size: 12px;" disabled>Next →</button>
+    </div>
+    </div>
         </div>
     </div>
 
@@ -629,20 +685,93 @@
         let jobQueue = [];
         const userTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
         let consoleLines = [];
+        let isRedirecting = false;
+        let currentHistoryPage = 1;
+
+        // Centralized fetch wrapper that handles authentication failures
+        function authenticatedFetch(url, options = {}) {
+            return fetch(url, options)
+                .then(response => {
+                    // Check for authentication failures
+                    if (response.status === 401 || response.status === 403) {
+                        if (!isRedirecting) {
+                            isRedirecting = true;
+                            // Show notification
+                            addConsoleLog('⚠️ Procore connection lost. Redirecting to login...', 'warn');
+                            
+                            // Show visual notification overlay
+                            const overlay = document.createElement('div');
+                            overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.8);z-index:10000;display:flex;align-items:center;justify-content:center;flex-direction:column;color:#fff;font-size:18px;';
+                            overlay.innerHTML = `
+                                <div style="text-align:center;padding:30px;background:#1a1a1a;border-radius:8px;border:2px solid #e74c3c;">
+                                    <div style="font-size:48px;margin-bottom:20px;">⚠️</div>
+                                    <div style="font-weight:600;margin-bottom:10px;">Procore Connection Lost</div>
+                                    <div style="font-size:14px;color:#888;">Redirecting to login page...</div>
+                                </div>
+                            `;
+                            document.body.appendChild(overlay);
+                            
+                            // Redirect after showing message
+                            setTimeout(() => {
+                                window.location.href = "/login";
+                            }, 2000);
+                        }
+                        // Return a rejected promise to stop further processing
+                        return Promise.reject(new Error('Authentication failed'));
+                    }
+                    return response;
+                })
+                .catch(error => {
+                    // If it's an auth error, don't log it (we're redirecting)
+                    if (error.message === 'Authentication failed') {
+                        throw error;
+                    }
+                    // For other errors, log and rethrow
+                    console.error('Fetch error:', error);
+                    throw error;
+                });
+        }
 
         // Initialize
-        fetch('/api/projects').then(r => { 
-            if (r.status === 401) window.location.href = "/login"; 
-            return r.json(); 
-        }).then(data => {
-            const sel = document.getElementById('project-select');
-            sel.innerHTML = '<option value="">-- Select Project --</option>';
-            if (data) data.forEach(p => sel.innerHTML += `<option value="${p.id}">${p.name}</option>`);
-        });
+        authenticatedFetch('/api/projects')
+            .then(r => r.json())
+            .then(data => {
+                const sel = document.getElementById('project-select');
+                sel.innerHTML = '<option value="">-- Select Project --</option>';
+                if (data) data.forEach(p => sel.innerHTML += `<option value="${p.id}">${p.name}</option>`);
+            })
+            .catch(error => {
+                if (error.message !== 'Authentication failed') {
+                    console.error('Error loading projects:', error);
+                }
+            });
 
+        // Initialize: always start on page 1 to show most recent jobs
+        currentHistoryPage = 1;
         loadRecentJobs(); 
         loadSchedules(); 
-        setInterval(loadRecentJobs, 2000);
+        setInterval(() => {
+            // Always check current page for jobs
+            loadRecentJobs();
+        }, 2000);
+        
+        // Update running job times every second
+        setInterval(() => {
+            const tbody = document.getElementById('jobs-table-body');
+            if (!tbody) return;
+            
+            const rows = tbody.querySelectorAll('tr');
+            rows.forEach(row => {
+                const runtimeEl = row.querySelector('[id^="runtime-"]');
+                if (runtimeEl) {
+                    const createdAt = runtimeEl.getAttribute('data-created-at');
+                    if (createdAt) {
+                        const elapsed = calculateElapsedTime(createdAt);
+                        runtimeEl.innerHTML = `⏱️ ${elapsed}`;
+                    }
+                }
+            });
+        }, 1000);
 
         function addConsoleLog(message, type = 'info') {
             const now = new Date();
@@ -665,80 +794,315 @@
         }
 
         function updateHistoryCount() {
-            fetch('/api/recent_jobs').then(r => r.json()).then(jobs => {
-                document.getElementById('history-count').textContent = `SHOWING ${Math.min(jobs.length, 10)} OF ${jobs.length} RECORDS`;
-            });
+            authenticatedFetch(`/api/recent_jobs?page=${currentHistoryPage}&per_page=6`)
+                .then(r => r.json())
+                .then(data => {
+                    const jobs = data.jobs || [];
+                    const pagination = data.pagination || {};
+                    const total = pagination.total || 0;
+                    const showing = jobs.length;
+                    const start = showing > 0 ? (currentHistoryPage - 1) * 6 + 1 : 0;
+                    const end = start + showing - 1;
+                    
+                    document.getElementById('history-count').textContent = `SHOWING ${showing} OF ${total} RECORDS`;
+                    
+                    // Update pagination controls
+                    const paginationEl = document.getElementById('history-pagination');
+                    const pageInfo = document.getElementById('history-page-info');
+                    const prevBtn = document.getElementById('history-prev-btn');
+                    const nextBtn = document.getElementById('history-next-btn');
+                    
+                    if (total > 6) {
+                        paginationEl.style.display = 'flex';
+                        pageInfo.textContent = `Page ${pagination.page || 1} of ${pagination.total_pages || 1}`;
+                        prevBtn.disabled = !pagination.has_prev;
+                        nextBtn.disabled = !pagination.has_next;
+                    } else {
+                        paginationEl.style.display = 'none';
+                    }
+                })
+                .catch(error => {
+                    if (error.message !== 'Authentication failed') {
+                        console.error('Error updating history count:', error);
+                    }
+                });
+        }
+        
+        function changeHistoryPage(delta) {
+            const newPage = currentHistoryPage + delta;
+            if (newPage < 1) return;
+            
+            currentHistoryPage = newPage;
+            loadRecentJobs();
+            updateHistoryCount();
+        }
+        
+        function calculateElapsedTime(createdAt) {
+            const start = new Date(createdAt + "Z");
+            const now = new Date();
+            const seconds = Math.floor((now - start) / 1000);
+            return formatRuntime(seconds);
+        }
+        
+        function formatRuntime(totalSeconds) {
+            if (totalSeconds < 60) {
+                return `${totalSeconds}s`;
+            } else if (totalSeconds < 3600) {
+                const minutes = Math.floor(totalSeconds / 60);
+                const seconds = totalSeconds % 60;
+                return seconds > 0 ? `${minutes}m ${seconds}s` : `${minutes}m`;
+            } else {
+                const hours = Math.floor(totalSeconds / 3600);
+                const minutes = Math.floor((totalSeconds % 3600) / 60);
+                const seconds = totalSeconds % 60;
+                if (minutes > 0 && seconds > 0) {
+                    return `${hours}h ${minutes}m ${seconds}s`;
+                } else if (minutes > 0) {
+                    return `${hours}h ${minutes}m`;
+                } else {
+                    return `${hours}h ${seconds}s`;
+                }
+            }
+        }
+        
+
+        function updateDisciplineCount() {
+            const sel = document.getElementById('discipline-select');
+            const countEl = document.getElementById('discipline-count');
+            if (!sel || !countEl) return;
+            
+            const total = Array.from(sel.options).filter(opt => !opt.disabled).length;
+            const selected = Array.from(sel.selectedOptions).length;
+            countEl.textContent = `(${total} displayed, ${selected} selected)`;
         }
 
         function selectAllDisciplines() {
             const sel = document.getElementById('discipline-select');
-            if (sel.disabled) return;
-            for (let i = 0; i < sel.options.length; i++) {
-                if (!sel.options[i].disabled) {
-                    sel.options[i].selected = true;
+            if (!sel || sel.disabled) return;
+            
+            // Select all non-disabled options
+            Array.from(sel.options).forEach(opt => {
+                if (!opt.disabled && opt.value !== '') {
+                    opt.selected = true;
                 }
-            }
+            });
+            
+            // Force browser to repaint by focusing and blurring
+            sel.focus();
+            setTimeout(() => {
+                sel.blur();
+                // Trigger change event to update counts and load drawings
+                sel.dispatchEvent(new Event('change'));
+            }, 10);
         }
 
         function deselectAllDisciplines() {
             const sel = document.getElementById('discipline-select');
-            if (sel.disabled) return;
-            for (let i = 0; i < sel.options.length; i++) {
-                sel.options[i].selected = false;
-            }
+            if (!sel || sel.disabled) return;
+            
+            Array.from(sel.options).forEach(opt => opt.selected = false);
+            
+            // Trigger change event to update counts
+            sel.dispatchEvent(new Event('change'));
         }
 
         function loadDisciplines() {
             const pid = document.getElementById('project-select').value;
             if (!pid) {
                 document.getElementById('discipline-section').style.display = 'none';
+                document.getElementById('drawings-section').style.display = 'none';
                 return;
             }
             document.getElementById('discipline-section').style.display = 'block';
-            const sel = document.getElementById('discipline-select');
+            document.getElementById('drawings-section').style.display = 'none';
+                const sel = document.getElementById('discipline-select');
             sel.innerHTML = '<option disabled style="color: #666; text-align: center;">⏳ Loading disciplines...</option>';
             sel.disabled = true;
             
-            fetch(`/api/disciplines?project_id=${pid}`)
+            authenticatedFetch(`/api/disciplines?project_id=${pid}`)
                 .then(r => {
                     if (!r.ok) throw new Error('Failed to load disciplines');
                     return r.json();
                 })
                 .then(data => {
                     sel.disabled = false;
-                    sel.innerHTML = '';
+                sel.innerHTML = '';
                     if (data.disciplines && data.disciplines.length > 0) {
-                        data.disciplines.forEach(d => sel.innerHTML += `<option value="${d}">${d}</option>`);
-                        addConsoleLog(`Loaded ${data.disciplines.length} disciplines`, 'info');
+                        // Check if disciplines is array of objects (with counts) or strings (legacy)
+                        const isObjectFormat = typeof data.disciplines[0] === 'object';
+                        if (isObjectFormat) {
+                            data.disciplines.forEach(d => {
+                                const name = d.name || d;
+                                const count = d.count || 0;
+                                sel.innerHTML += `<option value="${name}">${name} (${count} drawing${count !== 1 ? 's' : ''})</option>`;
+                            });
+                            const totalDrawings = data.disciplines.reduce((sum, d) => sum + (d.count || 0), 0);
+                            addConsoleLog(`Loaded ${data.disciplines.length} disciplines with ${totalDrawings} total drawings`, 'info');
+                        } else {
+                            // Legacy format - just strings
+                            data.disciplines.forEach(d => sel.innerHTML += `<option value="${d}">${d}</option>`);
+                            addConsoleLog(`Loaded ${data.disciplines.length} disciplines`, 'info');
+                        }
+                        updateDisciplineCount();
                     } else {
                         sel.innerHTML = '<option disabled style="color: #666;">No disciplines found</option>';
+                        updateDisciplineCount();
                     }
                 })
                 .catch(error => {
+                    if (error.message === 'Authentication failed') {
+                        return; // Don't show error, redirecting
+                    }
                     sel.disabled = false;
                     sel.innerHTML = '<option disabled style="color: #e74c3c;">❌ Error loading disciplines</option>';
                     addConsoleLog('Failed to load disciplines', 'warn');
                 });
         }
 
+        function loadDrawings() {
+            const pid = document.getElementById('project-select').value;
+            const dSel = document.getElementById('discipline-select');
+            const selectedDisciplines = Array.from(dSel.selectedOptions).map(o => o.value);
+            
+            if (!pid || selectedDisciplines.length === 0) {
+                document.getElementById('drawings-section').style.display = 'none';
+                return;
+            }
+            
+            // Show drawings section
+            document.getElementById('drawings-section').style.display = 'block';
+            const drawingSel = document.getElementById('drawing-select');
+            drawingSel.innerHTML = '<option disabled style="color: #666;">⏳ Loading drawings...</option>';
+            drawingSel.disabled = true;
+            
+            // Load drawings for all selected disciplines
+            const allDrawings = [];
+            const loadPromises = selectedDisciplines.map(discipline => 
+                authenticatedFetch(`/api/drawings?project_id=${pid}&discipline=${encodeURIComponent(discipline)}`)
+                    .then(r => {
+                        if (!r.ok) throw new Error(`Failed to load drawings for ${discipline}`);
+                        return r.json();
+                    })
+                    .then(data => {
+                        if (data.drawings) {
+                            data.drawings.forEach(d => {
+                                d.discipline = discipline; // Tag with discipline
+                                allDrawings.push(d);
+                            });
+                        }
+                    })
+            );
+            
+            Promise.all(loadPromises)
+                .then(() => {
+                    drawingSel.disabled = false;
+                    drawingSel.innerHTML = '';
+                    
+                    if (allDrawings.length > 0) {
+                        // Sort by drawing number
+                        allDrawings.sort((a, b) => {
+                            const numA = a.number || '';
+                            const numB = b.number || '';
+                            return numA.localeCompare(numB, undefined, { numeric: true, sensitivity: 'base' });
+                        });
+                        
+                        // Populate main drawing select
+                        allDrawings.forEach(d => {
+                            const rev = d.revision ? ` Rev.${d.revision}` : '';
+                            const optionText = `${d.number}${rev} - ${d.title || ''} (${d.discipline})`;
+                            drawingSel.innerHTML += `<option value="${d.id}" data-number="${d.number}" data-discipline="${d.discipline}">${optionText}</option>`;
+                        });
+                        
+                        addConsoleLog(`Loaded ${allDrawings.length} drawings from ${selectedDisciplines.length} discipline(s)`, 'info');
+                        updateDrawingCount();
+                    } else {
+                        drawingSel.innerHTML = '<option disabled style="color: #666;">No drawings found</option>';
+                        updateDrawingCount();
+                    }
+                })
+                .catch(error => {
+                    if (error.message !== 'Authentication failed') {
+                        drawingSel.disabled = false;
+                        drawingSel.innerHTML = '<option disabled style="color: #e74c3c;">❌ Error loading drawings</option>';
+                        addConsoleLog('Failed to load drawings', 'warn');
+                        updateDrawingCount();
+                    }
+                });
+        }
+
+        function updateDrawingCount() {
+            const sel = document.getElementById('drawing-select');
+            const countEl = document.getElementById('drawing-count');
+            if (!sel || !countEl) return;
+            
+            const total = Array.from(sel.options).filter(opt => !opt.disabled).length;
+            const selected = Array.from(sel.selectedOptions).length;
+            countEl.textContent = `(${total} displayed, ${selected} selected)`;
+        }
+
+        function selectAllDrawings() {
+            const sel = document.getElementById('drawing-select');
+            if (!sel || sel.disabled) return;
+            
+            // Select all non-disabled options
+            Array.from(sel.options).forEach(opt => {
+                if (!opt.disabled && opt.value !== '') {
+                    opt.selected = true;
+                }
+            });
+            
+            // Force browser to repaint by focusing and blurring
+            sel.focus();
+            setTimeout(() => {
+                sel.blur();
+                // Trigger change event to update counts
+                sel.dispatchEvent(new Event('change'));
+            }, 10);
+        }
+
+        function deselectAllDrawings() {
+            const sel = document.getElementById('drawing-select');
+            if (!sel || sel.disabled) return;
+            
+            Array.from(sel.options).forEach(opt => opt.selected = false);
+            
+            // Trigger change event to update counts
+            sel.dispatchEvent(new Event('change'));
+        }
+
         function addToQueue() {
             const pSel = document.getElementById('project-select');
             const dSel = document.getElementById('discipline-select');
+            const drawingSel = document.getElementById('drawing-select');
             const discs = Array.from(dSel.selectedOptions).map(o => o.value);
+            const selectedDrawings = Array.from(drawingSel.selectedOptions).map(o => o.value);
+            
             if (discs.length === 0) {
                 addConsoleLog('No disciplines selected', 'warn');
                 return;
             }
-            jobQueue.push({ 
+            
+            const jobData = { 
                 project_id: parseInt(pSel.value), 
                 project_name: pSel.options[pSel.selectedIndex].text, 
-                disciplines: discs 
-            });
+                disciplines: discs
+            };
+            
+            // If specific drawings are selected, include them; otherwise process all drawings in disciplines
+            if (selectedDrawings.length > 0) {
+                jobData.drawing_ids = selectedDrawings.map(id => parseInt(id)); // Convert to integers
+                addConsoleLog(`Added ${pSel.options[pSel.selectedIndex].text} with ${selectedDrawings.length} selected drawing(s) to queue`, 'success');
+            } else {
+                addConsoleLog(`Added ${pSel.options[pSel.selectedIndex].text} with all drawings from selected disciplines to queue`, 'success');
+            }
+            
+            jobQueue.push(jobData);
             renderQueue();
             pSel.value = ""; 
             dSel.innerHTML = ""; 
+            drawingSel.innerHTML = "";
             document.getElementById('discipline-section').style.display = 'none';
-            addConsoleLog(`Added ${pSel.options[pSel.selectedIndex].text} to queue`, 'success');
+            document.getElementById('drawings-section').style.display = 'none';
         }
 
         function renderQueue() {
@@ -747,7 +1111,11 @@
             list.innerHTML = '';
             jobQueue.forEach((j, i) => {
                 const li = document.createElement('li');
-                li.innerHTML = `<span><b>${j.project_name}</b> (${j.disciplines.join(', ')})</span> <span class="remove-link" onclick="jobQueue.splice(${i},1);renderQueue()">DELETE</span>`;
+                let desc = `<b>${j.project_name}</b> - ${j.disciplines.join(', ')}`;
+                if (j.drawing_ids && j.drawing_ids.length > 0) {
+                    desc += ` (${j.drawing_ids.length} selected drawing${j.drawing_ids.length !== 1 ? 's' : ''})`;
+                }
+                li.innerHTML = `<span>${desc}</span> <span class="remove-link" onclick="jobQueue.splice(${i},1);renderQueue()">DELETE</span>`;
                 list.appendChild(li);
             });
         }
@@ -758,16 +1126,21 @@
                 return;
             }
             addConsoleLog(`Starting batch job with ${jobQueue.length} project(s)`, 'info');
-            fetch('/api/start_job', { 
+            authenticatedFetch('/api/start_job', { 
                 method: 'POST', 
                 headers: { 'Content-Type': 'application/json' }, 
                 body: JSON.stringify({ queue: jobQueue }) 
-            }).then(r => r.json()).then(() => { 
+            })
+            .then(r => r.json())
+            .then(() => { 
                 jobQueue = []; 
                 renderQueue(); 
                 addConsoleLog('Batch job initiated successfully', 'success');
-            }).catch(err => {
-                addConsoleLog('Failed to start batch job', 'warn');
+            })
+            .catch(err => {
+                if (err.message !== 'Authentication failed') {
+                    addConsoleLog('Failed to start batch job', 'warn');
+                }
             });
         }
 
@@ -784,30 +1157,37 @@
         function confirmSchedule() {
             const day = document.getElementById('sched-day').value;
             const time = document.getElementById('sched-time').value;
-            fetch('/api/schedule_batch', {
+            authenticatedFetch('/api/schedule_batch', {
                 method: 'POST', 
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ queue: jobQueue, day: day, time: time, timezone: userTimezone })
-            }).then(r => r.json()).then(() => {
+            })
+            .then(r => r.json())
+            .then(() => {
                 addConsoleLog(`Scheduled automation for ${day} ${time}`, 'success');
                 jobQueue = []; 
                 renderQueue(); 
                 document.getElementById('schedule-options').style.display = 'none'; 
                 document.getElementById('main-actions').style.display = 'flex'; 
                 loadSchedules();
-            }).catch(err => {
-                addConsoleLog('Failed to create schedule', 'warn');
+            })
+            .catch(err => {
+                if (err.message !== 'Authentication failed') {
+                    addConsoleLog('Failed to create schedule', 'warn');
+                }
             });
         }
 
         function loadSchedules() {
-            fetch('/api/schedules').then(r => r.json()).then(data => {
+            authenticatedFetch('/api/schedules')
+                .then(r => r.json())
+                .then(data => {
                 const list = document.getElementById('schedule-list');
                 list.innerHTML = '';
-                if (!data.length) {
-                    list.innerHTML = '<div style="color:#666; text-align:center; padding:20px;">No active schedules.</div>';
-                    return;
-                }
+                    if (!data.length) {
+                        list.innerHTML = '<div style="color:#666; text-align:center; padding:20px;">No active schedules.</div>';
+                        return;
+                    }
                 data.forEach(s => {
                     const discs = JSON.parse(s.disciplines_json);
                     const timeStr = `${s.day_of_week} ${s.hour.toString().padStart(2, '0')}:${s.minute.toString().padStart(2, '0')}`;
@@ -839,7 +1219,12 @@
                     // Update countdown
                     updateCountdown(s.id, nextRun);
                 });
-            });
+                })
+                .catch(error => {
+                    if (error.message !== 'Authentication failed') {
+                        console.error('Error loading schedules:', error);
+                    }
+                });
         }
 
         function calculateNextRun(dayOfWeek, hour, minute, timezone) {
@@ -888,35 +1273,77 @@
         }
 
         setInterval(() => {
-            fetch('/api/schedules').then(r => r.json()).then(data => {
-                data.forEach(s => {
-                    const nextRun = calculateNextRun(s.day_of_week, s.hour, s.minute, s.timezone);
-                    updateCountdown(s.id, nextRun);
+            authenticatedFetch('/api/schedules')
+                .then(r => r.json())
+                .then(data => {
+                    data.forEach(s => {
+                        const nextRun = calculateNextRun(s.day_of_week, s.hour, s.minute, s.timezone);
+                        updateCountdown(s.id, nextRun);
+                    });
+                })
+                .catch(error => {
+                    if (error.message !== 'Authentication failed') {
+                        console.error('Error updating countdown:', error);
+                    }
                 });
-            });
         }, 1000);
 
         function deleteSchedule(id) {
             if (confirm("Stop this automation?")) {
-                fetch(`/api/schedule/${id}`, { method: 'DELETE' }).then(() => {
-                    loadSchedules();
-                    addConsoleLog('Automation deleted', 'info');
-                });
+                authenticatedFetch(`/api/schedule/${id}`, { method: 'DELETE' })
+                    .then(() => {
+                        loadSchedules();
+                        addConsoleLog('Automation deleted', 'info');
+                    })
+                    .catch(error => {
+                        if (error.message !== 'Authentication failed') {
+                            addConsoleLog('Failed to delete automation', 'warn');
+                        }
+                    });
             }
         }
 
-        function loadRecentJobs() {
-            fetch('/api/recent_jobs').then(r => r.json()).then(jobs => {
+        function loadRecentJobs(forcePage = null) {
+            const pageToLoad = forcePage !== null ? forcePage : currentHistoryPage;
+            authenticatedFetch(`/api/recent_jobs?page=${pageToLoad}&per_page=6`)
+                .then(r => r.json())
+                .then(data => {
+                    const jobs = data.jobs || [];
+                    const pagination = data.pagination || {};
+                    
+                    // Check if there are any active jobs (queued, processing, uploading) on page 1
+                    // If user is on a different page and there are active jobs, suggest going to page 1
+                    // But don't force it - let user navigate freely
+                    const hasActiveJobsOnPage1 = pageToLoad === 1 && jobs.some(j => ['queued', 'processing', 'uploading'].includes(j.status));
+                    
+                    // Update current page if we forced a page change
+                    if (forcePage !== null) {
+                        currentHistoryPage = forcePage;
+                    }
+                    
                 const tbody = document.getElementById('jobs-table-body');
                 tbody.innerHTML = '';
-                jobs.slice(0, 10).forEach(j => {
+                    
+                    if (jobs.length === 0) {
+                        tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:#888;padding:20px;">No jobs found</td></tr>';
+                    }
+                    
+                jobs.forEach(j => {
                     let actionHtml = '-';
                     let pct = j.progress || 0;
                     let barColor = '#3498db';
                     let statusText = j.status.toUpperCase();
 
+                    // Build progress text with drawing counts if available
+                    let progressDetails = '';
+                    if (j.total_drawings && j.total_drawings > 0) {
+                        const processed = j.processed_drawings || 0;
+                        const remaining = Math.max(0, j.total_drawings - processed);
+                        progressDetails = ` (${processed}/${j.total_drawings} drawings)`;
+                    }
+                    
                     if (j.status === 'processing') { 
-                        statusText = `GENERATING ${pct}%`; 
+                        statusText = `GENERATING ${pct}%${progressDetails}`; 
                     } else if (j.status === 'uploading') { 
                         statusText = "UPLOADING..."; 
                         barColor = '#f39c12'; 
@@ -928,9 +1355,19 @@
                         statusText = "FAILED"; 
                         barColor = '#e74c3c'; 
                         pct = 100; 
+                    } else if (j.status === 'cancelled') {
+                        statusText = "CANCELLED";
+                        barColor = '#95a5a6';
+                        pct = j.progress || 0;
+                    } else if (j.status === 'queued') {
+                        statusText = "QUEUED";
+                        barColor = '#9b59b6';
                     }
 
-                    if (j.status === 'completed' || j.status === 'failed') {
+                    // Show cancel button for queued, processing, or uploading jobs
+                    if (j.status === 'queued' || j.status === 'processing' || j.status === 'uploading') {
+                        actionHtml = `<button onclick="cancelJob('${j.id}')" class="cancel-btn">✕ CANCEL</button>`;
+                    } else if (j.status === 'completed' || j.status === 'failed') {
                         let parts = (j.result_message || "").split("||");
                         let link = parts[0]; 
                         let errorMsg = parts[1];
@@ -943,23 +1380,107 @@
                         } else {
                             actionHtml = `<span style="color:#e74c3c">Failed</span>`;
                         }
+                    } else if (j.status === 'cancelled') {
+                        actionHtml = `<span style="color:#95a5a6; font-size:12px;">Cancelled</span>`;
                     }
 
                     const tr = document.createElement('tr');
+                    const jobDate = new Date(j.created_at + "Z");
+                    const dateStr = jobDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+                    const timeStr = jobDate.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit' });
+                    
+                    // Calculate runtime
+                    let runtimeHtml = '';
+                    const isOngoing = ['queued', 'processing', 'uploading'].includes(j.status);
+                    if (isOngoing) {
+                        // For ongoing jobs, show elapsed time (will update via setInterval)
+                        const elapsed = calculateElapsedTime(j.created_at);
+                        runtimeHtml = `<span style="color:#4CAF50; font-size:12px; font-weight:600;" id="runtime-${j.id}" data-created-at="${j.created_at}">⏱️ ${elapsed}</span>`;
+                    } else {
+                        // For finished jobs, show total run time
+                        const endTime = j.updated_at ? new Date(j.updated_at + "Z") : new Date();
+                        const startTime = new Date(j.created_at + "Z");
+                        const totalSeconds = Math.floor((endTime - startTime) / 1000);
+                        const runtime = formatRuntime(totalSeconds);
+                        runtimeHtml = `<span style="color:#888; font-size:12px;">${runtime}</span>`;
+                    }
+                    
                     tr.innerHTML = `
-                        <td style="width:12%">${new Date(j.created_at + "Z").toLocaleTimeString()}</td>
-                        <td style="width:30%"><b>${j.project_name || 'Unknown'}</b></td>
-                        <td style="width:35%">
+                        <td style="width:15%"><div style="font-size:11px;color:#888;">${dateStr}</div><div style="font-size:12px;">${timeStr}</div></td>
+                        <td style="width:22%"><b>${j.project_name || 'Unknown'}</b></td>
+                        <td style="width:30%">
                             <span class="progress-text">${statusText} ${pct}%</span>
-                            <div class="progress-container">
-                                <div class="progress-bar" style="width: ${pct}%; background-color:${barColor}"></div>
-                            </div>
-                        </td>
-                        <td style="width:23%">${actionHtml}</td>
+                                <div class="progress-container">
+                                    <div class="progress-bar" style="width: ${pct}%; background-color:${barColor}"></div>
+                                </div>
+                            </td>
+                        <td style="width:18%">${runtimeHtml}</td>
+                        <td style="width:15%">${actionHtml}</td>
                     `;
                     tbody.appendChild(tr);
+                    });
+                    
+                    // Update pagination controls
+                    const paginationEl = document.getElementById('history-pagination');
+                    const pageInfo = document.getElementById('history-page-info');
+                    const prevBtn = document.getElementById('history-prev-btn');
+                    const nextBtn = document.getElementById('history-next-btn');
+                    
+                    if (pagination.total > 6) {
+                        paginationEl.style.display = 'flex';
+                        pageInfo.textContent = `Page ${pagination.page || 1} of ${pagination.total_pages || 1}`;
+                        prevBtn.disabled = !pagination.has_prev;
+                        nextBtn.disabled = !pagination.has_next;
+                    } else {
+                        paginationEl.style.display = 'none';
+                    }
+                    
+                    // Update count
+                    const total = pagination.total || 0;
+                    const showing = jobs.length;
+                    document.getElementById('history-count').textContent = `SHOWING ${showing} OF ${total} RECORDS`;
+                })
+                .catch(error => {
+                    if (error.message !== 'Authentication failed') {
+                        console.error('Error loading recent jobs:', error);
+                        const tbody = document.getElementById('jobs-table-body');
+                        if (tbody) {
+                            tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:#e74c3c;padding:20px;">Error loading jobs. Please refresh the page.</td></tr>';
+                        }
+                    }
                 });
-                updateHistoryCount();
+        }
+
+        function cancelJob(jobId) {
+            if (!confirm('Are you sure you want to cancel this job?')) {
+                return;
+            }
+            
+            authenticatedFetch(`/api/cancel_job/${jobId}`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                }
+            })
+            .then(r => {
+                if (!r.ok) {
+                    return r.json().then(err => {
+                        throw new Error(err.detail || 'Failed to cancel job');
+                    });
+                }
+                return r.json();
+            })
+            .then(data => {
+                console.log('Job cancelled:', data);
+                addConsoleLog(`Job ${jobId} cancelled`, 'warning');
+                // Reload jobs to show updated status
+                loadRecentJobs();
+            })
+            .catch(err => {
+                if (err.message !== 'Authentication failed') {
+                    console.error('Error cancelling job:', err);
+                    alert('Error cancelling job: ' + err.message);
+                }
             });
         }
 

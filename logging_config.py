@@ -96,6 +96,7 @@ def setup_logging(environment: str = "development", log_level: str = "INFO"):
     logging.getLogger("urllib3").setLevel(logging.WARNING)
     logging.getLogger("asyncio").setLevel(logging.WARNING)
     logging.getLogger("aiohttp").setLevel(logging.WARNING)
+    logging.getLogger("uvicorn.access").setLevel(logging.WARNING)  # Suppress HTTP request logs
     
     return root_logger
 
