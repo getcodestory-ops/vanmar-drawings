@@ -6,9 +6,11 @@ import shutil
 import asyncio
 import aiohttp
 import pymupdf
+import requests
+import ssl
 from datetime import datetime
 from typing import List, Dict, Any, Optional, Callable
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type, RetryError
 import logging
 
 from config import settings
@@ -20,6 +22,138 @@ from config import settings
 # import itertools
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------
+# RATE LIMIT TRACKER
+# ---------------------------------------------------------
+
+class RateLimitTracker:
+    """Tracks Procore API rate limits across all requests."""
+    
+    def __init__(self):
+        self.limit: Optional[int] = None  # X-Rate-Limit-Limit
+        self.remaining: Optional[int] = None  # X-Rate-Limit-Remaining
+        self.reset_time: Optional[int] = None  # X-Rate-Limit-Reset (Unix timestamp)
+        self.last_updated: Optional[float] = None  # When we last updated these values
+        self._lock = asyncio.Lock()  # Thread-safe updates
+    
+    def update_from_headers(self, headers: Dict[str, str]):
+        """Update rate limit info from response headers."""
+        try:
+            limit_str = headers.get('X-Rate-Limit-Limit')
+            remaining_str = headers.get('X-Rate-Limit-Remaining')
+            reset_str = headers.get('X-Rate-Limit-Reset')
+            
+            if limit_str:
+                self.limit = int(limit_str)
+            if remaining_str:
+                self.remaining = int(remaining_str)
+            if reset_str:
+                self.reset_time = int(reset_str)
+            
+            self.last_updated = time.time()
+            
+            # Log if we're getting low on requests
+            if self.remaining is not None and self.limit is not None:
+                percentage = (self.remaining / self.limit) * 100
+                if percentage < 10:
+                    logger.warning(f"⚠️  Rate limit low: {self.remaining}/{self.limit} requests remaining ({percentage:.1f}%)")
+                elif percentage < 25:
+                    logger.info(f"ℹ️  Rate limit: {self.remaining}/{self.limit} requests remaining ({percentage:.1f}%)")
+        except (ValueError, TypeError) as e:
+            logger.debug(f"Could not parse rate limit headers: {e}")
+    
+    async def check_and_wait_if_needed(self):
+        """
+        Check if we need to wait before making a request.
+        Returns True if we waited, False otherwise.
+        """
+        async with self._lock:
+            current_time = time.time()
+            
+            # If we don't have rate limit info, proceed
+            if self.remaining is None or self.reset_time is None:
+                return False
+            
+            # If we have remaining requests, proceed
+            if self.remaining > 0:
+                return False
+            
+            # We're out of requests - check if reset time has passed
+            if current_time >= self.reset_time:
+                # Reset time has passed, but we haven't gotten new headers yet
+                # Proceed anyway - the next request will update our info
+                logger.info(f"Rate limit reset time passed ({self.reset_time}), proceeding with request")
+                return False
+            
+            # We need to wait until reset time
+            wait_seconds = self.reset_time - current_time
+            if wait_seconds > 0:
+                wait_minutes = wait_seconds / 60
+                logger.warning(f"⏸️  Rate limit exhausted ({self.remaining}/{self.limit}). Waiting {wait_seconds:.0f}s ({wait_minutes:.1f} min) until reset at {datetime.fromtimestamp(self.reset_time).strftime('%H:%M:%S')}")
+                await asyncio.sleep(wait_seconds)
+                return True
+            
+            return False
+    
+    def get_status(self) -> Dict[str, Any]:
+        """Get current rate limit status for API/UI."""
+        current_time = time.time()
+        
+        status = {
+            "limit": self.limit,
+            "remaining": self.remaining,
+            "reset_time": self.reset_time,
+            "last_updated": self.last_updated,
+            "is_available": True,
+            "wait_seconds": 0,
+            "percentage_remaining": None
+        }
+        
+        if self.remaining is not None and self.limit is not None:
+            status["percentage_remaining"] = (self.remaining / self.limit) * 100
+        
+        if self.remaining is not None and self.remaining <= 0 and self.reset_time is not None:
+            if current_time < self.reset_time:
+                status["is_available"] = False
+                status["wait_seconds"] = int(self.reset_time - current_time)
+        
+        return status
+
+
+# Global rate limit tracker instance
+_rate_limit_tracker = RateLimitTracker()
+
+
+# ---------------------------------------------------------
+# HELPER FUNCTIONS
+# ---------------------------------------------------------
+
+def extract_ssl_error_details(error: Exception) -> dict:
+    """Extract detailed SSL error information for diagnostics."""
+    details = {
+        "error_type": type(error).__name__,
+        "error_message": str(error)
+    }
+    
+    # Try to extract retry attempt information
+    if hasattr(error, 'last_attempt'):
+        try:
+            details["retry_attempts"] = error.last_attempt.attempt_number
+        except:
+            details["retry_attempts"] = "unknown"
+    
+    # Try to extract the original exception
+    if isinstance(error, RetryError):
+        try:
+            original_error = error.last_attempt.exception()
+            details["original_error_type"] = type(original_error).__name__
+            details["original_error_message"] = str(original_error)
+        except:
+            pass
+    
+    return details
 
 
 # ---------------------------------------------------------
@@ -133,41 +267,245 @@ class ProcoreDocManager:
             logger.error(f"Error archiving file {current_name}: {e}")
             return False
 
-    async def upload_file(self, local_file_path: str, target_folder_id: int) -> str:
-        """Upload a file to Procore."""
+    def upload_file_sync(self, local_file_path: str, target_folder_id: int) -> str:
+        """
+        Synchronous fallback upload using requests library.
+        Used when async upload fails due to SSL or connection issues.
+        """
         endpoint = f"{self.base_url}/rest/v1.0/files"
         params = {"project_id": self.project_id}
         file_name = os.path.basename(local_file_path)
 
+        # Get file size for logging
+        file_size_mb = os.path.getsize(local_file_path) / (1024 * 1024)
+        logger.info(f"         🔄 Synchronous upload attempt: {file_name} ({file_size_mb:.2f} MB)")
+        
+        # Calculate timeout (same as async: 10 sec/MB, min 5min, max 30min)
+        upload_timeout = min(max(300, int(file_size_mb * 10)), 1800)
+        
+        # Retry logic for sync upload (3 attempts with 5s delay)
+        max_retries = 3
+        for attempt in range(1, max_retries + 1):
+            try:
+                logger.info(f"         Sync upload attempt {attempt}/{max_retries}...")
+                upload_start = time.time()
+                
+                # Prepare multipart form data
+                with open(local_file_path, 'rb') as f:
+                    files = {
+                        'file[data]': (file_name, f, 'application/pdf')
+                    }
+                    data = {
+                        'file[parent_id]': str(target_folder_id),
+                        'file[name]': file_name
+                    }
+                    
+                    # Make synchronous POST request
+                    response = requests.post(
+                        endpoint,
+                        headers=self.headers,
+                        params=params,
+                        files=files,
+                        data=data,
+                        timeout=upload_timeout,
+                        verify=True  # Use system SSL certificates
+                    )
+                
+                if response.status_code in [200, 201]:
+                    upload_time = time.time() - upload_start
+                    logger.info(f"         ✓ Sync upload successful: '{file_name}' (took {upload_time:.2f}s, {file_size_mb/upload_time:.2f} MB/s)")
+                    return "Success"
+                else:
+                    error_msg = f"Error {response.status_code}: {response.text[:200]}"
+                    logger.warning(f"         ⚠ Sync upload attempt {attempt} failed: {error_msg}")
+                    
+                    if attempt < max_retries:
+                        time.sleep(5)  # Wait 5 seconds before retry
+                        continue
+                    else:
+                        logger.error(f"         ✗ Sync upload failed after {max_retries} attempts: {error_msg}")
+                        return error_msg
+                        
+            except requests.exceptions.Timeout as e:
+                error_msg = f"Sync upload timeout after {upload_timeout}s"
+                logger.warning(f"         ⚠ {error_msg} (attempt {attempt}/{max_retries})")
+                if attempt < max_retries:
+                    time.sleep(5)
+                    continue
+                else:
+                    logger.error(f"         ✗ {error_msg}")
+                    return error_msg
+                    
+            except Exception as e:
+                error_msg = f"Sync upload error: {type(e).__name__}: {str(e)}"
+                logger.warning(f"         ⚠ {error_msg} (attempt {attempt}/{max_retries})")
+                if attempt < max_retries:
+                    time.sleep(5)
+                    continue
+                else:
+                    logger.error(f"         ✗ {error_msg}")
+                    return error_msg
+        
+        return "Sync upload failed after all retries"
+
+    @retry(
+        stop=stop_after_attempt(5),  # Try up to 5 times
+        wait=wait_exponential(multiplier=2, min=5, max=60),  # 5s, 10s, 20s, 40s, 60s
+        retry=retry_if_exception_type((aiohttp.ServerDisconnectedError, aiohttp.ClientError, asyncio.TimeoutError, BrokenPipeError, OSError))
+    )
+    async def _upload_file_async(self, local_file_path: str, target_folder_id: int) -> str:
+        """
+        Async upload with retry logic for connection issues.
+        Improved SSL configuration for better compatibility.
+        """
+        endpoint = f"{self.base_url}/rest/v1.0/files"
+        params = {"project_id": self.project_id}
+        file_name = os.path.basename(local_file_path)
+        
+        # Get file size for logging
+        file_size_mb = os.path.getsize(local_file_path) / (1024 * 1024)
+        logger.info(f"         Uploading file: {file_name} ({file_size_mb:.2f} MB)")
+
         try:
+            # Create timeout - use longer timeout for large files
+            # Calculate timeout based on file size: 10 seconds per MB, minimum 5 minutes, maximum 30 minutes
+            upload_timeout = min(max(300, int(file_size_mb * 10)), 1800)  # 10 sec/MB, min 5min, max 30min
+            timeout = aiohttp.ClientTimeout(total=upload_timeout, connect=60, sock_read=upload_timeout)
+            
+            # Close and recreate session if it exists (to ensure fresh connection)
+            if self.session:
+                try:
+                    await self.session.close()
+                except:
+                    pass
+                self.session = None
+            
+            # Enhanced SSL context for better compatibility
+            ssl_context = ssl.create_default_context()
+            ssl_context.minimum_version = ssl.TLSVersion.TLSv1_2  # Force TLS 1.2+
+            ssl_context.check_hostname = True
+            ssl_context.verify_mode = ssl.CERT_REQUIRED
+            
+            # Create new session with improved settings for large file uploads
+            # Note: force_close=True prevents connection reuse but is incompatible with keepalive_timeout
+            connector = aiohttp.TCPConnector(
+                ssl=ssl_context,
+                limit=100,
+                limit_per_host=10,
+                enable_cleanup_closed=True,
+                force_close=True  # Don't reuse connections - prevents stale connection issues
+            )
+            self.session = aiohttp.ClientSession(
+                timeout=timeout,
+                connector=connector
+            )
+            
+            logger.info(f"         Upload timeout set to {upload_timeout}s for {file_size_mb:.2f} MB file")
+            upload_start = time.time()
+            
             with open(local_file_path, 'rb') as f:
                 data = aiohttp.FormData()
                 data.add_field('file[data]', f, filename=file_name, content_type='application/pdf')
                 data.add_field('file[parent_id]', str(target_folder_id))
                 data.add_field('file[name]', file_name)
                 
-                if not self.session:
-                    self.session = aiohttp.ClientSession()
-                
                 async with self.session.post(endpoint, headers=self.headers, params=params, data=data) as response:
                     if response.status not in [200, 201]:
                         text = await response.text()
-                        return f"Error: {text}"
+                        error_msg = f"Error {response.status}: {text[:200]}"
+                        logger.error(f"         ✗ Upload failed: {error_msg}")
+                        return error_msg
                     
-                    logger.info(f"Successfully uploaded '{file_name}'")
+                    upload_time = time.time() - upload_start
+                    logger.info(f"         ✓ Successfully uploaded '{file_name}' (took {upload_time:.2f}s, {file_size_mb/upload_time:.2f} MB/s)")
                     return "Success"
+        except asyncio.TimeoutError as e:
+            error_msg = f"Upload timeout after {upload_timeout}s (file size: {file_size_mb:.2f} MB)"
+            logger.error(f"         ✗ {error_msg}")
+            raise  # Re-raise to trigger retry
+        except (aiohttp.ServerDisconnectedError, aiohttp.ClientError) as e:
+            error_msg = f"Connection error during upload: {type(e).__name__}: {str(e)}"
+            logger.warning(f"         ⚠ {error_msg} - will retry...")
+            raise  # Re-raise to trigger retry
+        except BrokenPipeError as e:
+            error_msg = f"Broken pipe error during upload: {str(e)}"
+            logger.warning(f"         ⚠ {error_msg} - will retry...")
+            raise  # Re-raise to trigger retry
+        except OSError as e:
+            if e.errno == 32:  # Broken pipe
+                error_msg = f"Broken pipe error (connection closed): {str(e)}"
+                logger.warning(f"         ⚠ {error_msg} - will retry...")
+                raise  # Re-raise to trigger retry
+            else:
+                error_msg = f"OS error during upload: {str(e)}"
+                logger.error(f"         ✗ {error_msg}")
+                return error_msg
         except Exception as e:
-            logger.error(f"Error uploading file: {e}")
-            return str(e)
+            # For other exceptions, don't retry
+            error_msg = f"Error uploading file: {type(e).__name__}: {str(e)}"
+            logger.error(f"         ✗ {error_msg}")
+            return error_msg
+
+    async def upload_file(self, local_file_path: str, target_folder_id: int) -> str:
+        """
+        Upload a file to Procore.
+        Tries async upload first, falls back to synchronous upload if async fails.
+        """
+        file_name = os.path.basename(local_file_path)
+        file_size_mb = os.path.getsize(local_file_path) / (1024 * 1024)
+        async_start = time.time()
+        
+        try:
+            # Try async upload first (with automatic retries via @retry decorator)
+            result = await self._upload_file_async(local_file_path, target_folder_id)
+            return result
+            
+        except RetryError as e:
+            # All async retries exhausted
+            async_duration = time.time() - async_start
+            logger.warning(f"═══════════════════════════════════════════════════════════")
+            logger.warning(f"⚠️  ASYNC UPLOAD FAILED AFTER ALL RETRIES")
+            logger.warning(f"   File: {file_name} ({file_size_mb:.2f} MB)")
+            logger.warning(f"   Time spent on async attempts: {async_duration:.2f}s")
+            
+            # Log SSL diagnostics
+            ssl_details = extract_ssl_error_details(e)
+            logger.info(f"   SSL Error Details:")
+            for key, value in ssl_details.items():
+                logger.info(f"     - {key}: {value}")
+            
+            logger.warning(f"   Falling back to synchronous upload...")
+            logger.warning(f"═══════════════════════════════════════════════════════════")
+            
+            # Try synchronous fallback
+            sync_result = self.upload_file_sync(local_file_path, target_folder_id)
+            
+            if sync_result == "Success":
+                total_time = time.time() - async_start
+                logger.info(f"═══════════════════════════════════════════════════════════")
+                logger.info(f"✅ UPLOAD SUCCEEDED VIA SYNC FALLBACK")
+                logger.info(f"   File: {file_name}")
+                logger.info(f"   Total time (async attempts + sync): {total_time:.2f}s")
+                logger.info(f"═══════════════════════════════════════════════════════════")
+            
+            return sync_result
+            
+        except Exception as e:
+            # Unexpected error not caught by retry logic
+            error_msg = f"Unexpected upload error: {type(e).__name__}: {str(e)}"
+            logger.error(f"         ✗ {error_msg}")
+            return error_msg
 
     async def process_file_update(self, file_path: str, target_folder_id: int, archive_folder_id: Optional[int]) -> str:
         """Clean up existing files and upload new one."""
         upload_start = time.time()
+        file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
         logger.info(f"═══════════════════════════════════════════════════════════")
         logger.info(f"📤 STARTING PROCORE UPLOAD PROCESS")
         logger.info(f"   Target folder ID: {target_folder_id}")
         logger.info(f"   Archive folder ID: {archive_folder_id}")
         logger.info(f"   File: {os.path.basename(file_path)}")
+        logger.info(f"   File size: {file_size_mb:.2f} MB")
         logger.info(f"═══════════════════════════════════════════════════════════")
 
         # 1. Clean Sweep: Move ALL existing files in target -> Archive
@@ -309,10 +647,15 @@ class AsyncProcoreClient:
         retry=retry_if_exception_type((aiohttp.ClientError, asyncio.TimeoutError))
     )
     async def get(self, endpoint: str, params: Optional[Dict] = None) -> Any:
-        """Make GET request with retry logic."""
+        """Make GET request with retry logic and rate limit tracking."""
         await self._ensure_session()
         url = f"{self.base_url}{endpoint}"
         request_start = time.time()
+        
+        # Check rate limit before making request
+        waited = await _rate_limit_tracker.check_and_wait_if_needed()
+        if waited:
+            logger.info(f"         Resumed after rate limit wait")
         
         # Log request details (but not sensitive params)
         safe_params = {k: v for k, v in (params or {}).items() if k not in ['client_secret', 'access_token']}
@@ -322,10 +665,23 @@ class AsyncProcoreClient:
             async with self.session.get(url, headers=self.headers, params=params) as response:
                 request_time = time.time() - request_start
                 
+                # Update rate limit tracker from response headers
+                _rate_limit_tracker.update_from_headers(dict(response.headers))
+                
                 if response.status == 429:
-                    retry_after = int(response.headers.get('Retry-After', 60))
-                    logger.warning(f"         ⚠ Rate limited. Waiting {retry_after}s (request took {request_time:.2f}s)")
-                    await asyncio.sleep(retry_after)
+                    # Use X-Rate-Limit-Reset if available, otherwise fall back to Retry-After
+                    reset_timestamp = response.headers.get('X-Rate-Limit-Reset')
+                    if reset_timestamp:
+                        reset_time = int(reset_timestamp)
+                        current_time = time.time()
+                        wait_seconds = max(0, reset_time - current_time)
+                        logger.warning(f"         ⚠ Rate limited. Waiting {wait_seconds:.0f}s until reset at {datetime.fromtimestamp(reset_time).strftime('%H:%M:%S')} (request took {request_time:.2f}s)")
+                        if wait_seconds > 0:
+                            await asyncio.sleep(wait_seconds)
+                    else:
+                        retry_after = int(response.headers.get('Retry-After', 60))
+                        logger.warning(f"         ⚠ Rate limited. Waiting {retry_after}s (request took {request_time:.2f}s)")
+                        await asyncio.sleep(retry_after)
                     raise aiohttp.ClientError("Rate limited")
                 
                 # Don't raise for 401/403 - let caller handle auth errors
@@ -368,10 +724,15 @@ class AsyncProcoreClient:
         retry=retry_if_exception_type((aiohttp.ClientError, asyncio.TimeoutError))
     )
     async def post(self, endpoint: str, json: Optional[Dict] = None, params: Optional[Dict] = None) -> Any:
-        """Make POST request with retry logic."""
+        """Make POST request with retry logic and rate limit tracking."""
         await self._ensure_session()
         url = f"{self.base_url}{endpoint}"
         request_start = time.time()
+        
+        # Check rate limit before making request
+        waited = await _rate_limit_tracker.check_and_wait_if_needed()
+        if waited:
+            logger.info(f"         Resumed after rate limit wait")
         
         logger.debug(f"         API POST: {endpoint}")
         
@@ -382,10 +743,23 @@ class AsyncProcoreClient:
             async with self.session.post(url, headers=headers, json=json, params=params) as response:
                 request_time = time.time() - request_start
                 
+                # Update rate limit tracker from response headers
+                _rate_limit_tracker.update_from_headers(dict(response.headers))
+                
                 if response.status == 429:
-                    retry_after = int(response.headers.get('Retry-After', 60))
-                    logger.warning(f"         ⚠ Rate limited. Waiting {retry_after}s (request took {request_time:.2f}s)")
-                    await asyncio.sleep(retry_after)
+                    # Use X-Rate-Limit-Reset if available, otherwise fall back to Retry-After
+                    reset_timestamp = response.headers.get('X-Rate-Limit-Reset')
+                    if reset_timestamp:
+                        reset_time = int(reset_timestamp)
+                        current_time = time.time()
+                        wait_seconds = max(0, reset_time - current_time)
+                        logger.warning(f"         ⚠ Rate limited. Waiting {wait_seconds:.0f}s until reset at {datetime.fromtimestamp(reset_time).strftime('%H:%M:%S')} (request took {request_time:.2f}s)")
+                        if wait_seconds > 0:
+                            await asyncio.sleep(wait_seconds)
+                    else:
+                        retry_after = int(response.headers.get('Retry-After', 60))
+                        logger.warning(f"         ⚠ Rate limited. Waiting {retry_after}s (request took {request_time:.2f}s)")
+                        await asyncio.sleep(retry_after)
                     raise aiohttp.ClientError("Rate limited")
                 
                 # Don't raise for 401/403 - let caller handle auth errors
@@ -602,11 +976,11 @@ async def download_and_process_drawing(
         # Fetch markup layers to get layer IDs
         logger.debug(f"         Fetching markup layers for {d_num}...")
         m_params = {
-                "project_id": project_id,
-                "holder_id": revision_id,
-                "holder_type": "DrawingRevision",
-                "page": 1,
-                "page_size": 200
+            "project_id": project_id,
+            "holder_id": revision_id,
+            "holder_type": "DrawingRevision",
+            "page": 1,
+            "page_size": 200
         }
             
         try:

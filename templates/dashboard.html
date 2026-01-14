@@ -74,6 +74,42 @@
             50% { opacity: 0.5; }
         }
 
+        .rate-limit-indicator {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 11px;
+            padding: 4px 8px;
+            background: #2a2a2a;
+            border-radius: 4px;
+            border: 1px solid #3a3a3a;
+        }
+
+        .rate-limit-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #27ae60;
+        }
+
+        .rate-limit-dot.warning {
+            background: #f39c12;
+        }
+
+        .rate-limit-dot.critical {
+            background: #e74c3c;
+            animation: pulse 1s infinite;
+        }
+
+        .rate-limit-text {
+            color: #e0e0e0;
+        }
+
+        .rate-limit-waiting {
+            color: #f39c12;
+            font-weight: 600;
+        }
+
 
         /* MAIN LAYOUT */
         .main-container {
@@ -561,8 +597,12 @@
                 <div class="status-dot"></div>
                 <span style="font-size: 10px;">OPERATIONAL</span>
             </div>
+            <div id="rate-limit-indicator" class="rate-limit-indicator" style="display: none;">
+                <div id="rate-limit-dot" class="rate-limit-dot"></div>
+                <span id="rate-limit-text" class="rate-limit-text">Loading...</span>
+            </div>
             <div>
-                <span style="font-size: 10px; color: #888;">Version 1.0.0</span>
+                <span style="font-size: 10px; color: #888;">Version 1.0.1</span>
             </div>
         </div>
     </div>
@@ -760,7 +800,12 @@
         // Initialize: always start on page 1 to show most recent jobs
         currentHistoryPage = 1;
         loadRecentJobs(); 
-        loadSchedules(); 
+        loadSchedules();
+        
+        // Update rate limit status immediately and then every 5 seconds
+        updateRateLimitStatus();
+        setInterval(updateRateLimitStatus, 5000);
+        
         setInterval(() => {
             // Always check current page for jobs
             loadRecentJobs();
@@ -1473,6 +1518,55 @@
                         }
                     }
                 });
+        }
+
+        // Rate Limit Status Functions
+        async function updateRateLimitStatus() {
+            try {
+                const response = await fetch('/api/rate_limit_status');
+                if (!response.ok) {
+                    // If not authenticated or endpoint not available, hide indicator
+                    document.getElementById('rate-limit-indicator').style.display = 'none';
+                    return;
+                }
+                
+                const status = await response.json();
+                const indicator = document.getElementById('rate-limit-indicator');
+                const dot = document.getElementById('rate-limit-dot');
+                const text = document.getElementById('rate-limit-text');
+                
+                // Show indicator if we have rate limit data
+                if (status.limit !== null && status.remaining !== null) {
+                    indicator.style.display = 'flex';
+                    
+                    // Update dot color based on remaining percentage
+                    const percentage = status.percentage_remaining || 0;
+                    dot.className = 'rate-limit-dot';
+                    if (percentage < 10) {
+                        dot.classList.add('critical');
+                    } else if (percentage < 25) {
+                        dot.classList.add('warning');
+                    }
+                    
+                    // Update text
+                    if (!status.is_available && status.wait_seconds > 0) {
+                        const waitMinutes = Math.floor(status.wait_seconds / 60);
+                        const waitSeconds = status.wait_seconds % 60;
+                        text.className = 'rate-limit-text rate-limit-waiting';
+                        text.textContent = `⏸️ Waiting ${waitMinutes}m ${waitSeconds}s`;
+                    } else {
+                        text.className = 'rate-limit-text';
+                        text.textContent = `${status.remaining}/${status.limit} requests`;
+                    }
+                } else {
+                    // No rate limit data yet, hide indicator
+                    indicator.style.display = 'none';
+                }
+            } catch (error) {
+                // Silently fail - rate limit status is not critical
+                console.debug('Could not fetch rate limit status:', error);
+                document.getElementById('rate-limit-indicator').style.display = 'none';
+            }
         }
 
         function cancelJob(jobId) {

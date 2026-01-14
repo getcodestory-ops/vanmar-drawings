@@ -1102,6 +1102,24 @@ async def get_drawings(request: Request, project_id: int, discipline: str, acces
         raise HTTPException(status_code=500, detail=f"Failed to fetch drawings: {str(e)}")
 
 
+@app.get("/api/rate_limit_status")
+async def get_rate_limit_status():
+    """Get current Procore API rate limit status."""
+    from core_engine import _rate_limit_tracker
+    status = _rate_limit_tracker.get_status()
+    
+    # Format reset time for display
+    if status.get("reset_time"):
+        reset_time = datetime.fromtimestamp(status["reset_time"])
+        status["reset_time_formatted"] = reset_time.strftime("%Y-%m-%d %H:%M:%S")
+        status["reset_time_relative"] = f"{(status['reset_time'] - time.time()) / 60:.1f} minutes"
+    else:
+        status["reset_time_formatted"] = None
+        status["reset_time_relative"] = None
+    
+    return status
+
+
 @app.get("/api/recent_jobs")
 async def get_recent_jobs(
     page: int = 1,
