@@ -1118,11 +1118,51 @@ async def get_recent_jobs(
     # Get paginated jobs
     jobs = db.query(Job).order_by(Job.created_at.desc()).offset(offset).limit(per_page).all()
     
+    # Convert to dicts and check if PDF files exist
+    jobs_list = []
+    for job in jobs:
+        job_dict = {
+            "id": job.id,
+            "status": job.status,
+            "project_id": job.project_id,
+            "project_name": job.project_name,
+            "created_at": job.created_at.isoformat() if job.created_at else None,
+            "updated_at": job.updated_at.isoformat() if job.updated_at else None,
+            "result_message": job.result_message,
+            "progress": job.progress,
+            "error_details": job.error_details,
+            "total_drawings": job.total_drawings,
+            "processed_drawings": job.processed_drawings,
+            "pdf_exists": False
+        }
+        
+        # Check if PDF file exists
+        if job.result_message:
+            # Extract the file path (before || if there's an error message)
+            pdf_path = job.result_message.split("||")[0].strip()
+            if pdf_path:
+                # Normalize the path - ensure it's relative to project root
+                if pdf_path.startswith("output/"):
+                    # Already has output/ prefix
+                    pdf_path = pdf_path
+                elif pdf_path.startswith("/"):
+                    # Absolute path - extract just the filename
+                    pdf_path = os.path.join("output", os.path.basename(pdf_path))
+                else:
+                    # Relative path without output/ - add it
+                    pdf_path = os.path.join("output", pdf_path)
+                
+                # Check if file exists
+                if os.path.exists(pdf_path) and os.path.isfile(pdf_path):
+                    job_dict["pdf_exists"] = True
+        
+        jobs_list.append(job_dict)
+    
     # Calculate total pages
     total_pages = (total_count + per_page - 1) // per_page if total_count > 0 else 1
     
     return {
-        "jobs": jobs,
+        "jobs": jobs_list,
         "pagination": {
             "page": page,
             "per_page": per_page,
