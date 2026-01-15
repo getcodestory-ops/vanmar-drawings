@@ -2102,7 +2102,8 @@ def cleanup_old_pdfs(max_files: int = 20):
 
 def merge_pdfs(files_to_merge: List[Dict], project_name: str, temp_dir: str) -> tuple[str, int]:
     """
-    Merge PDFs with TOC (CPU-intensive operation).
+    Merge PDFs with TOC (memory-efficient for large batches).
+    Uses batch processing to stay within memory limits (e.g., Render.com 512MB).
     Returns: (final_output_path, actual_page_count)
     """
     merge_start = time.time()
@@ -2113,6 +2114,27 @@ def merge_pdfs(files_to_merge: List[Dict], project_name: str, temp_dir: str) -> 
     logger.debug(f"         Cleaning up old PDFs (keeping last 20)...")
     cleanup_old_pdfs(max_files=20)
     
+    # Generate filename
+    clean_proj = re.sub(r'[^a-zA-Z0-9]', '_', project_name)
+    date_str = datetime.now().strftime("%d_%m_%y")
+    final_filename = f"{clean_proj}_Merged_{date_str}.pdf"
+    final_output_path = os.path.join("output", final_filename)
+    
+    # For large batches (>50 files), use batch processing to save memory
+    # Process in chunks of 50 files at a time, saving intermediate results
+    BATCH_SIZE = 50
+    use_batch_processing = len(files_to_merge) > BATCH_SIZE
+    
+    if use_batch_processing:
+        logger.info(f"         Using batch processing (chunks of {BATCH_SIZE}) to manage memory...")
+        return _merge_pdfs_batch(files_to_merge, final_output_path, temp_dir, BATCH_SIZE, merge_start)
+    else:
+        # For smaller batches, use the original method
+        return _merge_pdfs_single_pass(files_to_merge, final_output_path, temp_dir, merge_start)
+
+
+def _merge_pdfs_single_pass(files_to_merge: List[Dict], final_output_path: str, temp_dir: str, merge_start: float) -> tuple[str, int]:
+    """Original single-pass merge for smaller batches."""
     merged_doc = pymupdf.open()
     toc = []
     current_discipline = None
@@ -2150,13 +2172,7 @@ def merge_pdfs(files_to_merge: List[Dict], project_name: str, temp_dir: str) -> 
     logger.info(f"         Setting table of contents ({len(toc)} entries)...")
     merged_doc.set_toc(toc)
     
-    # Generate filename
-    clean_proj = re.sub(r'[^a-zA-Z0-9]', '_', project_name)
-    date_str = datetime.now().strftime("%d_%m_%y")
-    final_filename = f"{clean_proj}_Merged_{date_str}.pdf"
-    
-    final_output_path = os.path.join("output", final_filename)
-    logger.info(f"         Saving merged PDF to {final_filename}...")
+    logger.info(f"         Saving merged PDF...")
     save_start = time.time()
     merged_doc.save(final_output_path, garbage=4, deflate=True)
     save_time = time.time() - save_start
@@ -2172,11 +2188,155 @@ def merge_pdfs(files_to_merge: List[Dict], project_name: str, temp_dir: str) -> 
     
     if verified_page_count != actual_page_count:
         logger.warning(f"         ⚠ Page count mismatch: Document shows {actual_page_count} but saved file has {verified_page_count}")
-        actual_page_count = verified_page_count  # Use the verified count
+        actual_page_count = verified_page_count
     
     final_size = os.path.getsize(final_output_path) / (1024 * 1024)  # MB
-    logger.info(f"         ✓ Saved {final_filename} ({final_size:.2f} MB, {actual_page_count} pages, took {save_time:.2f}s)")
+    logger.info(f"         ✓ Saved ({final_size:.2f} MB, {actual_page_count} pages, took {save_time:.2f}s)")
     
+    _cleanup_after_merge(temp_dir, files_merged, len(files_to_merge), actual_page_count, merge_start)
+    
+    return final_output_path, actual_page_count
+
+
+def _merge_pdfs_batch(files_to_merge: List[Dict], final_output_path: str, temp_dir: str, batch_size: int, merge_start: float) -> tuple[str, int]:
+    """
+    Memory-efficient batch merging for large PDF collections.
+    Processes files in batches, saving intermediate results to disk.
+    """
+    import gc
+    
+    # Create temporary directory for intermediate files
+    intermediate_dir = os.path.join(temp_dir, "merge_intermediate")
+    os.makedirs(intermediate_dir, exist_ok=True)
+    
+    toc = []
+    current_discipline = None
+    total_pages = 0
+    files_merged = 0
+    batch_files = []
+    
+    # Process files in batches
+    num_batches = (len(files_to_merge) + batch_size - 1) // batch_size
+    
+    for batch_num in range(num_batches):
+        batch_start_idx = batch_num * batch_size
+        batch_end_idx = min(batch_start_idx + batch_size, len(files_to_merge))
+        batch_items = files_to_merge[batch_start_idx:batch_end_idx]
+        
+        logger.info(f"         Processing batch {batch_num + 1}/{num_batches} (files {batch_start_idx + 1}-{batch_end_idx})...")
+        
+        # Create a new document for this batch
+        batch_doc = pymupdf.open()
+        batch_toc = []
+        batch_current_discipline = current_discipline
+        batch_pages = 0
+        
+        for idx, item in enumerate(batch_items, start=batch_start_idx + 1):
+            try:
+                logger.debug(f"         [{idx}/{len(files_to_merge)}] Merging: {item.get('title', 'Unknown')}")
+                file_start = time.time()
+                doc_single = pymupdf.open(item['path'])
+                page_count = len(doc_single)
+                
+                # Add discipline header to TOC (tracking offset from previous batches)
+                if item['discipline'] != batch_current_discipline:
+                    batch_toc.append([1, item['discipline'], len(batch_doc) + total_pages + 1])
+                    batch_current_discipline = item['discipline']
+                    current_discipline = batch_current_discipline
+                    logger.debug(f"           Discipline section: {item['discipline']}")
+                
+                # Add drawing to TOC
+                batch_toc.append([2, item['title'], len(batch_doc) + total_pages + 1])
+                
+                # Insert pages
+                batch_doc.insert_pdf(doc_single)
+                batch_pages += page_count
+                files_merged += 1
+                doc_single.close()
+                
+                file_time = time.time() - file_start
+                logger.debug(f"           ✓ Added {page_count} page(s) (took {file_time:.2f}s)")
+            except Exception as e:
+                logger.warning(f"         [{idx}/{len(files_to_merge)}] ✗ Could not merge {item.get('path', 'Unknown')}: {type(e).__name__}: {str(e)}")
+                continue
+        
+        # Save this batch to a temporary file
+        batch_filename = os.path.join(intermediate_dir, f"batch_{batch_num + 1}.pdf")
+        logger.debug(f"         Saving batch {batch_num + 1} to intermediate file...")
+        batch_doc.save(batch_filename, garbage=4, deflate=True)
+        batch_doc.close()
+        
+        # Add batch TOC entries to main TOC
+        toc.extend(batch_toc)
+        total_pages += batch_pages
+        batch_files.append(batch_filename)
+        
+        # Force garbage collection to free memory
+        gc.collect()
+        logger.info(f"         ✓ Batch {batch_num + 1} complete: {batch_pages} pages (total so far: {total_pages})")
+    
+    # Now merge all batch files into final document
+    logger.info(f"         Merging {len(batch_files)} batch files into final document...")
+    final_doc = pymupdf.open()
+    
+    for batch_idx, batch_file in enumerate(batch_files):
+        try:
+            logger.debug(f"         Merging batch file {batch_idx + 1}/{len(batch_files)}...")
+            batch_doc = pymupdf.open(batch_file)
+            final_doc.insert_pdf(batch_doc)
+            batch_doc.close()
+            
+            # Clean up intermediate file immediately
+            try:
+                os.remove(batch_file)
+            except:
+                pass
+            
+            # Force garbage collection
+            gc.collect()
+        except Exception as e:
+            logger.warning(f"         ✗ Could not merge batch file {batch_file}: {type(e).__name__}: {str(e)}")
+            continue
+    
+    # Set final TOC
+    logger.info(f"         Setting table of contents ({len(toc)} entries)...")
+    final_doc.set_toc(toc)
+    
+    # Save final document
+    logger.info(f"         Saving final merged PDF...")
+    save_start = time.time()
+    final_doc.save(final_output_path, garbage=4, deflate=True)
+    save_time = time.time() - save_start
+    
+    # Verify the saved PDF page count
+    actual_page_count = len(final_doc)
+    final_doc.close()
+    
+    # Double-check by reopening the saved file
+    verify_doc = pymupdf.open(final_output_path)
+    verified_page_count = len(verify_doc)
+    verify_doc.close()
+    
+    if verified_page_count != actual_page_count:
+        logger.warning(f"         ⚠ Page count mismatch: Document shows {actual_page_count} but saved file has {verified_page_count}")
+        actual_page_count = verified_page_count
+    
+    # Clean up any remaining intermediate files
+    try:
+        shutil.rmtree(intermediate_dir)
+    except:
+        pass
+    
+    final_size = os.path.getsize(final_output_path) / (1024 * 1024)  # MB
+    logger.info(f"         ✓ Saved ({final_size:.2f} MB, {actual_page_count} pages, took {save_time:.2f}s)")
+    
+    _cleanup_after_merge(temp_dir, files_merged, len(files_to_merge), actual_page_count, merge_start)
+    
+    return final_output_path, actual_page_count
+
+
+def _cleanup_after_merge(temp_dir: str, files_merged: int, total_files: int, page_count: int, merge_start: float):
+    """Helper function to clean up after merge and log summary."""
     # Cleanup old PDFs after saving (to maintain max 20 files)
     cleanup_old_pdfs(max_files=20)
     
@@ -2191,9 +2351,7 @@ def merge_pdfs(files_to_merge: List[Dict], project_name: str, temp_dir: str) -> 
         logger.warning(f"         ⚠ Could not clean up temp directory: {e}")
     
     total_merge_time = time.time() - merge_start
-    logger.info(f"         Merge summary: {files_merged}/{len(files_to_merge)} files, {actual_page_count} pages, {total_merge_time:.2f}s total")
-    
-    return final_output_path, actual_page_count
+    logger.info(f"         Merge summary: {files_merged}/{total_files} files, {page_count} pages, {total_merge_time:.2f}s total")
 
 
 # ---------------------------------------------------------
