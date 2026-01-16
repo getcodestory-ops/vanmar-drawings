@@ -1076,26 +1076,26 @@ class AsyncProcoreClient:
     
     def _create_ssl_context(self):
         """Create SSL context with proper certificate handling."""
-            import ssl
-            
-            ssl_context = ssl.create_default_context()
-            
+        import ssl
+
+        ssl_context = ssl.create_default_context()
+
         # Try to use certifi certificates
-            try:
-                import certifi
-                ssl_context = ssl.create_default_context(cafile=certifi.where())
+        try:
+            import certifi
+            ssl_context = ssl.create_default_context(cafile=certifi.where())
             logger.info("ProcoreDocManager: Using certifi SSL certificates")
-            except ImportError:
+        except ImportError:
             logger.warning("ProcoreDocManager: certifi not available, using system certificates")
-            except Exception as ssl_error:
+        except Exception as ssl_error:
             logger.error(f"ProcoreDocManager: SSL configuration error: {ssl_error}")
-                
-                # Development fallback: disable SSL verification
-                if settings.ENVIRONMENT == "development":
+
+            # Development fallback: disable SSL verification
+            if settings.ENVIRONMENT == "development":
                 logger.warning("⚠️  ProcoreDocManager: SSL VERIFICATION DISABLED (DEVELOPMENT ONLY)")
-                    ssl_context.check_hostname = False
-                    ssl_context.verify_mode = ssl.CERT_NONE
-                else:
+                ssl_context.check_hostname = False
+                ssl_context.verify_mode = ssl.CERT_NONE
+            else:
                 raise Exception("SSL certificate verification failed. Run: pip install --upgrade certifi")
 
         return ssl_context
@@ -1188,7 +1188,7 @@ class AsyncProcoreClient:
                     raise aiohttp.ClientError("Rate limited")
                 
                 response.raise_for_status()
-                    return await response.json()
+                return await response.json()
                     
         except Exception as e:
             logger.error(f"API POST failed: {endpoint} - {str(e)}")
@@ -1342,17 +1342,17 @@ async def download_and_process_drawing(
 
         # Fetch markup layers to get layer IDs
         logger.debug(f"         Fetching markup layers for {d_num}...")
-            m_params = {
-                "project_id": project_id,
-                "holder_id": revision_id,
-                "holder_type": "DrawingRevision",
-                "page": 1,
-                "page_size": 200
-            }
-            
-            try:
+        m_params = {
+            "project_id": project_id,
+            "holder_id": revision_id,
+            "holder_type": "DrawingRevision",
+            "page": 1,
+            "page_size": 200
+        }
+        
+        try:
             markup_start = time.time()
-                markup_data = await client.get("/rest/v1.0/markup_layers", params=m_params)
+            markup_data = await client.get("/rest/v1.0/markup_layers", params=m_params)
             markup_time = time.time() - markup_start
             
             # Extract layer IDs
@@ -1383,7 +1383,7 @@ async def download_and_process_drawing(
             file_size = os.path.getsize(filename) / 1024  # KB
             logger.info(f"         ✓ Downloaded {d_num} with markups ({file_size:.1f} KB, took {download_time:.2f}s)")
             
-            except Exception as e:
+        except Exception as e:
             logger.error(f"         ✗ Failed to get pre-rendered PDF for {d_num}: {type(e).__name__}: {str(e)}")
             raise  # Re-raise to fail the job as per requirements
         
@@ -2750,13 +2750,13 @@ def merge_pdfs(files_to_merge: List[Dict], project_name: str, temp_dir: str) -> 
                         # Note: We track page numbers globally (total_pages + current batch offset)
                         current_page_num = total_pages + len(batch_doc) - len(src_doc) + 1
                         
-            if item['discipline'] != current_discipline:
+                        if item['discipline'] != current_discipline:
                             toc.append([1, item['discipline'], current_page_num])
-                current_discipline = item['discipline']
-            
+                            current_discipline = item['discipline']
+                        
                         toc.append([2, item['title'], current_page_num])
-            
-        except Exception as e:
+                        
+                except Exception as e:
                     logger.warning(f"          ⚠ Skipping corrupt file {item.get('title')}: {e}")
 
             # Save this batch to disk
