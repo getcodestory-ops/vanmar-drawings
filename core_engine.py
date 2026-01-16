@@ -202,29 +202,94 @@ class ProcoreDocManager:
         
         return ssl_context
 
+    # @retry(
+    #     stop=stop_after_attempt(3),
+    #     wait=wait_exponential(multiplier=1, min=2, max=10),
+    #     retry=retry_if_exception_type((aiohttp.ClientError, asyncio.TimeoutError))
+    # )
+    # async def _make_request(self, method: str, url: str, **kwargs):
+    #     """Make HTTP request with retry logic."""
+    #     if not self.session:
+    #         connector = aiohttp.TCPConnector(ssl=self.ssl_context)
+    #         self.session = aiohttp.ClientSession(connector=connector)
+        
+    #     try:
+    #         async with self.session.request(method, url, **kwargs) as response:
+    #             if response.status == 429:  # Rate limit
+    #                 retry_after = int(response.headers.get('Retry-After', 60))
+    #                 logger.warning(f"Rate limited. Waiting {retry_after}s")
+    #                 await asyncio.sleep(retry_after)
+    #                 raise aiohttp.ClientError("Rate limited, retrying")
+                
+    #             response.raise_for_status()
+    #             return await response.json() if response.content_type == 'application/json' else await response.text()
+    #     except Exception as e:
+    #         logger.error(f"Request failed: {method} {url} - {e}")
+    #         raise
+
+
+    async def _ensure_session(self):
+        """
+        Creates a persistent aiohttp session if one doesn't exist.
+        CRITICAL FIX: Enables Keep-Alive to prevent connection churn/timeouts.
+        """
+        if not self.session or self.session.closed:
+            # Configure TCP Connector for Persistent Connections
+            connector = aiohttp.TCPConnector(
+                ssl=self.ssl_context,     # Use the SSL context from __init__
+                limit=10,                 # Max concurrent connections
+                limit_per_host=10,        # Max connections to Procore
+                enable_cleanup_closed=True,
+                force_close=False,        # <--- FALSE enables Keep-Alive (Fixes timeouts)
+                keepalive_timeout=60,     # Keep connection open for 60s
+                ttl_dns_cache=300         # Cache DNS to save lookups
+            )
+            
+            # Standard timeout for general API calls
+            # (We override this for uploads specifically in the upload method)
+            timeout = aiohttp.ClientTimeout(total=settings.DOWNLOAD_TIMEOUT, connect=60)
+            
+            self.session = aiohttp.ClientSession(
+                timeout=timeout,
+                connector=connector
+            )
+            logger.info("ProcoreDocManager: Created new persistent ClientSession")
+
+
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=2, max=10),
         retry=retry_if_exception_type((aiohttp.ClientError, asyncio.TimeoutError))
     )
     async def _make_request(self, method: str, url: str, **kwargs):
-        """Make HTTP request with retry logic."""
-        if not self.session:
-            connector = aiohttp.TCPConnector(ssl=self.ssl_context)
-            self.session = aiohttp.ClientSession(connector=connector)
+        """
+        Make HTTP request reusing the persistent session to prevent connection churn.
+        """
+        # 1. Ensure we use the shared persistent session
+        await self._ensure_session()
         
         try:
+            # 2. Use self.session directly
             async with self.session.request(method, url, **kwargs) as response:
-                if response.status == 429:  # Rate limit
+                
+                # Handle Rate Limiting (429)
+                if response.status == 429:
                     retry_after = int(response.headers.get('Retry-After', 60))
                     logger.warning(f"Rate limited. Waiting {retry_after}s")
                     await asyncio.sleep(retry_after)
+                    # Raise exception to trigger the @retry decorator
                     raise aiohttp.ClientError("Rate limited, retrying")
                 
+                # Check for standard HTTP errors
                 response.raise_for_status()
-                return await response.json() if response.content_type == 'application/json' else await response.text()
+                
+                # Return JSON or Text based on content type
+                if 'application/json' in response.headers.get('Content-Type', ''):
+                    return await response.json()
+                return await response.text()
+                
         except Exception as e:
-            logger.error(f"Request failed: {method} {url} - {e}")
+            logger.error(f"Request failed: {method} {url} - {type(e).__name__}: {e}")
             raise
 
     async def get_all_files_in_folder(self, folder_id: int) -> List[Dict]:
@@ -246,14 +311,51 @@ class ProcoreDocManager:
             return []
 
     async def move_and_rename_file(self, file_id: int, current_name: str, destination_folder_id: int) -> bool:
-        """Renames a file (adds timestamp) and moves it to Archive."""
+        """Renames a file (adds creation date) and moves it to Archive."""
         endpoint = f"{self.base_url}/rest/v1.0/files/{file_id}"
         params = {"project_id": self.project_id}
         
-        timestamp = int(time.time())
+        # Get file metadata to retrieve creation date
+        file_created_date = None
+        try:
+            file_data = await self._make_request('GET', endpoint, headers=self.headers, params=params)
+            # Try different possible date fields from Procore API
+            if isinstance(file_data, dict):
+                created_at = file_data.get('created_at') or file_data.get('created_at_date') or file_data.get('uploaded_at')
+                if created_at:
+                    # Parse the date string from Procore (format may vary)
+                    try:
+                        # Handle ISO format with timezone (e.g., "2026-01-15T10:30:00Z" or "2026-01-15T10:30:00+00:00")
+                        if isinstance(created_at, str) and 'T' in created_at:
+                            # Remove timezone info and parse
+                            date_str = created_at.split('T')[0] if 'T' in created_at else created_at
+                            dt = datetime.strptime(date_str, '%Y-%m-%d')
+                        elif isinstance(created_at, str):
+                            # Try direct date format
+                            dt = datetime.strptime(created_at.split()[0], '%Y-%m-%d')
+                        else:
+                            # If it's already a datetime object or timestamp
+                            dt = created_at if isinstance(created_at, datetime) else datetime.fromtimestamp(created_at)
+                        file_created_date = dt.strftime("%d_%m_%y")
+                        logger.debug(f"Extracted creation date: {file_created_date} from {created_at}")
+                    except (ValueError, AttributeError, TypeError) as parse_error:
+                        logger.debug(f"Could not parse creation date '{created_at}': {parse_error}")
+        except Exception as e:
+            logger.debug(f"Could not fetch file metadata for creation date: {e}")
+        
+        # If we couldn't get creation date, use current date as fallback
+        # (This should rarely happen, but ensures the function still works)
+        if not file_created_date:
+            file_created_date = datetime.now().strftime("%d_%m_%y")
+            logger.debug(f"Using current date as fallback for file creation date")
+        
+        # Generate timestamp for archive time to prevent duplicates
+        # Format: HHMMSS (24-hour format, no colons)
+        archive_timestamp = datetime.now().strftime("%H%M%S")
+        
         name_part, ext_part = os.path.splitext(current_name)
-        clean_name = name_part.replace(" old", "")
-        new_name = f"{clean_name}_archived_{timestamp}{ext_part}"
+        clean_name = name_part.replace(" old", "").replace("_Merged", "")  # Remove _Merged if present
+        new_name = f"{clean_name}_Merged_{file_created_date}_archived_{archive_timestamp}{ext_part}"
 
         payload = {"file": {"name": new_name, "parent_id": destination_folder_id}}
         headers = self.headers.copy()
@@ -348,103 +450,169 @@ class ProcoreDocManager:
         
         return "Sync upload failed after all retries"
 
+    # @retry(
+    #     stop=stop_after_attempt(5),  # Try up to 5 times
+    #     wait=wait_exponential(multiplier=2, min=5, max=60),  # 5s, 10s, 20s, 40s, 60s
+    #     retry=retry_if_exception_type((aiohttp.ServerDisconnectedError, aiohttp.ClientError, asyncio.TimeoutError, BrokenPipeError, OSError))
+    # )
+    # async def _upload_file_async(self, local_file_path: str, target_folder_id: int) -> str:
+    #     """
+    #     Async upload with retry logic for connection issues.
+    #     Improved SSL configuration for better compatibility.
+    #     """
+    #     endpoint = f"{self.base_url}/rest/v1.0/files"
+    #     params = {"project_id": self.project_id}
+    #     file_name = os.path.basename(local_file_path)
+        
+    #     # Get file size for logging
+    #     file_size_mb = os.path.getsize(local_file_path) / (1024 * 1024)
+    #     logger.info(f"         Uploading file: {file_name} ({file_size_mb:.2f} MB)")
+
+    #     try:
+    #         # Create timeout - use longer timeout for large files
+    #         # Calculate timeout based on file size: 10 seconds per MB, minimum 5 minutes, maximum 30 minutes
+    #         upload_timeout = min(max(300, int(file_size_mb * 10)), 1800)  # 10 sec/MB, min 5min, max 30min
+    #         timeout = aiohttp.ClientTimeout(total=upload_timeout, connect=60, sock_read=upload_timeout)
+            
+    #         # Close and recreate session if it exists (to ensure fresh connection)
+    #         if self.session:
+    #             try:
+    #                 await self.session.close()
+    #             except:
+    #                 pass
+    #             self.session = None
+            
+    #         # Enhanced SSL context for better compatibility
+    #         ssl_context = ssl.create_default_context()
+    #         ssl_context.minimum_version = ssl.TLSVersion.TLSv1_2  # Force TLS 1.2+
+    #         ssl_context.check_hostname = True
+    #         ssl_context.verify_mode = ssl.CERT_REQUIRED
+            
+    #         # Create new session with improved settings for large file uploads
+    #         # Note: force_close=True prevents connection reuse but is incompatible with keepalive_timeout
+    #         connector = aiohttp.TCPConnector(
+    #             ssl=ssl_context,
+    #             limit=100,
+    #             limit_per_host=10,
+    #             enable_cleanup_closed=True,
+    #             force_close=True  # Don't reuse connections - prevents stale connection issues
+    #         )
+    #         self.session = aiohttp.ClientSession(
+    #             timeout=timeout,
+    #             connector=connector
+    #         )
+            
+    #         logger.info(f"         Upload timeout set to {upload_timeout}s for {file_size_mb:.2f} MB file")
+    #         upload_start = time.time()
+            
+    #         with open(local_file_path, 'rb') as f:
+    #             data = aiohttp.FormData()
+    #             data.add_field('file[data]', f, filename=file_name, content_type='application/pdf')
+    #             data.add_field('file[parent_id]', str(target_folder_id))
+    #             data.add_field('file[name]', file_name)
+                
+    #             async with self.session.post(endpoint, headers=self.headers, params=params, data=data) as response:
+    #                 if response.status not in [200, 201]:
+    #                     text = await response.text()
+    #                     error_msg = f"Error {response.status}: {text[:200]}"
+    #                     logger.error(f"         ✗ Upload failed: {error_msg}")
+    #                     return error_msg
+                    
+    #                 upload_time = time.time() - upload_start
+    #                 logger.info(f"         ✓ Successfully uploaded '{file_name}' (took {upload_time:.2f}s, {file_size_mb/upload_time:.2f} MB/s)")
+    #                 return "Success"
+    #     except asyncio.TimeoutError as e:
+    #         error_msg = f"Upload timeout after {upload_timeout}s (file size: {file_size_mb:.2f} MB)"
+    #         logger.error(f"         ✗ {error_msg}")
+    #         raise  # Re-raise to trigger retry
+    #     except (aiohttp.ServerDisconnectedError, aiohttp.ClientError) as e:
+    #         error_msg = f"Connection error during upload: {type(e).__name__}: {str(e)}"
+    #         logger.warning(f"         ⚠ {error_msg} - will retry...")
+    #         raise  # Re-raise to trigger retry
+    #     except BrokenPipeError as e:
+    #         error_msg = f"Broken pipe error during upload: {str(e)}"
+    #         logger.warning(f"         ⚠ {error_msg} - will retry...")
+    #         raise  # Re-raise to trigger retry
+    #     except OSError as e:
+    #         if e.errno == 32:  # Broken pipe
+    #             error_msg = f"Broken pipe error (connection closed): {str(e)}"
+    #             logger.warning(f"         ⚠ {error_msg} - will retry...")
+    #             raise  # Re-raise to trigger retry
+    #         else:
+    #             error_msg = f"OS error during upload: {str(e)}"
+    #             logger.error(f"         ✗ {error_msg}")
+    #             return error_msg
+    #     except Exception as e:
+    #         # For other exceptions, don't retry
+    #         error_msg = f"Error uploading file: {type(e).__name__}: {str(e)}"
+    #         logger.error(f"         ✗ {error_msg}")
+    #         return error_msg
+
     @retry(
-        stop=stop_after_attempt(5),  # Try up to 5 times
-        wait=wait_exponential(multiplier=2, min=5, max=60),  # 5s, 10s, 20s, 40s, 60s
+        stop=stop_after_attempt(5),
+        wait=wait_exponential(multiplier=2, min=5, max=60),
         retry=retry_if_exception_type((aiohttp.ServerDisconnectedError, aiohttp.ClientError, asyncio.TimeoutError, BrokenPipeError, OSError))
     )
     async def _upload_file_async(self, local_file_path: str, target_folder_id: int) -> str:
         """
-        Async upload with retry logic for connection issues.
-        Improved SSL configuration for better compatibility.
+        Async upload reusing the persistent session to avoid Handshake Storms.
         """
+        # 1. Ensure we have a valid persistent session
+        await self._ensure_session()
+        
         endpoint = f"{self.base_url}/rest/v1.0/files"
         params = {"project_id": self.project_id}
         file_name = os.path.basename(local_file_path)
-        
-        # Get file size for logging
         file_size_mb = os.path.getsize(local_file_path) / (1024 * 1024)
-        logger.info(f"         Uploading file: {file_name} ({file_size_mb:.2f} MB)")
+        
+        # 2. Calculate dynamic timeout based on file size (10s per MB, min 60s)
+        # This prevents "ReadTimeout" on slow networks while keeping it tight for small files
+        custom_timeout_val = max(60, int(file_size_mb * 10))
+        
+        # sock_read is the crucial timeout here - it waits for data chunks
+        req_timeout = aiohttp.ClientTimeout(total=custom_timeout_val * 2, sock_read=custom_timeout_val, connect=30)
+
+        logger.info(f"          Uploading: {file_name} ({file_size_mb:.2f} MB)")
+        upload_start = time.time()
 
         try:
-            # Create timeout - use longer timeout for large files
-            # Calculate timeout based on file size: 10 seconds per MB, minimum 5 minutes, maximum 30 minutes
-            upload_timeout = min(max(300, int(file_size_mb * 10)), 1800)  # 10 sec/MB, min 5min, max 30min
-            timeout = aiohttp.ClientTimeout(total=upload_timeout, connect=60, sock_read=upload_timeout)
-            
-            # Close and recreate session if it exists (to ensure fresh connection)
-            if self.session:
-                try:
-                    await self.session.close()
-                except:
-                    pass
-                self.session = None
-            
-            # Enhanced SSL context for better compatibility
-            ssl_context = ssl.create_default_context()
-            ssl_context.minimum_version = ssl.TLSVersion.TLSv1_2  # Force TLS 1.2+
-            ssl_context.check_hostname = True
-            ssl_context.verify_mode = ssl.CERT_REQUIRED
-            
-            # Create new session with improved settings for large file uploads
-            # Note: force_close=True prevents connection reuse but is incompatible with keepalive_timeout
-            connector = aiohttp.TCPConnector(
-                ssl=ssl_context,
-                limit=100,
-                limit_per_host=10,
-                enable_cleanup_closed=True,
-                force_close=True  # Don't reuse connections - prevents stale connection issues
-            )
-            self.session = aiohttp.ClientSession(
-                timeout=timeout,
-                connector=connector
-            )
-            
-            logger.info(f"         Upload timeout set to {upload_timeout}s for {file_size_mb:.2f} MB file")
-            upload_start = time.time()
-            
             with open(local_file_path, 'rb') as f:
                 data = aiohttp.FormData()
                 data.add_field('file[data]', f, filename=file_name, content_type='application/pdf')
                 data.add_field('file[parent_id]', str(target_folder_id))
                 data.add_field('file[name]', file_name)
                 
-                async with self.session.post(endpoint, headers=self.headers, params=params, data=data) as response:
+                # 3. Perform Upload using the existing persistent session
+                async with self.session.post(
+                    endpoint, 
+                    headers=self.headers, 
+                    params=params, 
+                    data=data,
+                    timeout=req_timeout # Apply the specific timeout here
+                ) as response:
+                    
                     if response.status not in [200, 201]:
                         text = await response.text()
+                        # If it's a temporary server error (Gateway/RateLimit), raise to trigger retry
+                        if response.status in [429, 502, 503, 504]:
+                            response.raise_for_status()
+                        
                         error_msg = f"Error {response.status}: {text[:200]}"
-                        logger.error(f"         ✗ Upload failed: {error_msg}")
+                        logger.error(f"          ✗ Upload failed: {error_msg}")
                         return error_msg
                     
                     upload_time = time.time() - upload_start
-                    logger.info(f"         ✓ Successfully uploaded '{file_name}' (took {upload_time:.2f}s, {file_size_mb/upload_time:.2f} MB/s)")
+                    logger.info(f"          ✓ Uploaded '{file_name}' in {upload_time:.2f}s")
                     return "Success"
-        except asyncio.TimeoutError as e:
-            error_msg = f"Upload timeout after {upload_timeout}s (file size: {file_size_mb:.2f} MB)"
-            logger.error(f"         ✗ {error_msg}")
-            raise  # Re-raise to trigger retry
-        except (aiohttp.ServerDisconnectedError, aiohttp.ClientError) as e:
-            error_msg = f"Connection error during upload: {type(e).__name__}: {str(e)}"
-            logger.warning(f"         ⚠ {error_msg} - will retry...")
-            raise  # Re-raise to trigger retry
-        except BrokenPipeError as e:
-            error_msg = f"Broken pipe error during upload: {str(e)}"
-            logger.warning(f"         ⚠ {error_msg} - will retry...")
-            raise  # Re-raise to trigger retry
-        except OSError as e:
-            if e.errno == 32:  # Broken pipe
-                error_msg = f"Broken pipe error (connection closed): {str(e)}"
-                logger.warning(f"         ⚠ {error_msg} - will retry...")
-                raise  # Re-raise to trigger retry
-            else:
-                error_msg = f"OS error during upload: {str(e)}"
-                logger.error(f"         ✗ {error_msg}")
-                return error_msg
+
+        except asyncio.TimeoutError:
+            logger.warning(f"          ⚠ Timeout uploading {file_name} - Retrying...")
+            raise # Let tenacity retry
         except Exception as e:
-            # For other exceptions, don't retry
-            error_msg = f"Error uploading file: {type(e).__name__}: {str(e)}"
-            logger.error(f"         ✗ {error_msg}")
-            return error_msg
+            # Let tenacity handle connection errors, but log others
+            if isinstance(e, (aiohttp.ClientError, OSError)):
+                raise
+            return f"Upload Error: {str(e)}"
 
     async def upload_file(self, local_file_path: str, target_folder_id: int) -> str:
         """
@@ -570,16 +738,19 @@ class ProcoreDocManager:
     async def _create_archive_folder(self, parent_folder_id: int) -> Optional[int]:
         """Create Archive subfolder."""
         try:
-            create_url = f"{self.base_url}/rest/v1.0/projects/{self.project_id}/folders"
+            # Correct endpoint: /rest/v1.0/folders with project_id as query param
+            create_url = f"{self.base_url}/rest/v1.0/folders"
             create_data = {"folder": {"name": "Archive", "parent_id": parent_folder_id}}
+            create_params = {"project_id": self.project_id}
             create_head = self.headers.copy()
             create_head["Content-Type"] = "application/json"
             
-            data = await self._make_request('POST', create_url, headers=create_head, json=create_data)
+            data = await self._make_request('POST', create_url, headers=create_head, params=create_params, json=create_data)
             archive_id = data.get('id')
             logger.info(f"Created Archive Folder: {archive_id}")
             return archive_id
-        except:
+        except Exception as e:
+            logger.debug(f"Could not create Archive folder: {e}")
             return None
 
     async def close(self):
@@ -592,8 +763,303 @@ class ProcoreDocManager:
 # SECTION 2: ASYNC PROCORE API CLIENT
 # ---------------------------------------------------------
 
+# class AsyncProcoreClient:
+#     """Async client for Procore API calls."""
+    
+#     def __init__(self, access_token: str, company_id: int):
+#         self.access_token = access_token
+#         self.company_id = company_id
+#         self.base_url = settings.PROCORE_BASE_URL
+#         self.headers = {
+#             "Authorization": f"Bearer {access_token}",
+#             "Procore-Company-Id": str(company_id),
+#             "Accept": "application/json"
+#         }
+#         self.session: Optional[aiohttp.ClientSession] = None
+    
+#     # async def _ensure_session(self):
+#     #     """Ensure session is created."""
+#     #     if not self.session:
+#     #         import ssl
+#     #         timeout = aiohttp.ClientTimeout(total=settings.DOWNLOAD_TIMEOUT)
+            
+#     #         # Create SSL context with proper certificate handling
+#     #         ssl_context = ssl.create_default_context()
+            
+#     #         # Try to use certifi certificates if available
+#     #         try:
+#     #             import certifi
+#     #             ssl_context = ssl.create_default_context(cafile=certifi.where())
+#     #             logger.info("Using certifi SSL certificates")
+#     #         except ImportError:
+#     #             logger.warning("certifi not available, using system certificates")
+#     #         except Exception as ssl_error:
+#     #             logger.error(f"SSL configuration error: {ssl_error}")
+                
+#     #             # Development fallback: disable SSL verification
+#     #             if settings.ENVIRONMENT == "development":
+#     #                 logger.warning("⚠️  SSL VERIFICATION DISABLED (DEVELOPMENT ONLY)")
+#     #                 logger.warning("⚠️  Fix by running: /Applications/Python\\ 3.14/Install\\ Certificates.command")
+#     #                 ssl_context.check_hostname = False
+#     #                 ssl_context.verify_mode = ssl.CERT_NONE
+#     #             else:
+#     #                 # Production: don't disable SSL
+#     #                 raise Exception("SSL certificate verification failed. Install certificates: pip install --upgrade certifi")
+            
+#     #         connector = aiohttp.TCPConnector(ssl=ssl_context)
+#     #         self.session = aiohttp.ClientSession(
+#     #             timeout=timeout,
+#     #             connector=connector
+#     #         )
+
+#     async def _ensure_session(self):
+#             """
+#             Creates a persistent aiohttp session if one doesn't exist.
+#             CRITICAL FIX: Enables Keep-Alive to prevent connection churn/timeouts.
+#             """
+#             if not self.session or self.session.closed:
+#                 # Configure TCP Connector for Persistent Connections
+#                 connector = aiohttp.TCPConnector(
+#                     ssl=self.ssl_context,     # Use the SSL context from __init__
+#                     limit=10,                 # Max concurrent connections
+#                     limit_per_host=10,        # Max connections to Procore
+#                     enable_cleanup_closed=True,
+#                     force_close=False,        # <--- FALSE enables Keep-Alive (Fixes timeouts)
+#                     keepalive_timeout=60,     # Keep connection open for 60s
+#                     ttl_dns_cache=300         # Cache DNS to save lookups
+#                 )
+                
+#                 # Default timeout for general operations
+#                 # (We override this for uploads specifically in the upload method)
+#                 timeout = aiohttp.ClientTimeout(total=300, connect=60)
+                
+#                 self.session = aiohttp.ClientSession(
+#                     timeout=timeout,
+#                     connector=connector
+#                 )
+#                 logger.info("ProcoreDocManager: Created new persistent ClientSession")
+    
+#     @retry(
+#         stop=stop_after_attempt(3),
+#         wait=wait_exponential(multiplier=1, min=2, max=10),
+#         retry=retry_if_exception_type((aiohttp.ClientError, asyncio.TimeoutError))
+#     )
+#     async def get(self, endpoint: str, params: Optional[Dict] = None) -> Any:
+#         """Make GET request with retry logic and rate limit tracking."""
+#         await self._ensure_session()
+#         url = f"{self.base_url}{endpoint}"
+#         request_start = time.time()
+        
+#         # Check rate limit before making request
+#         waited = await _rate_limit_tracker.check_and_wait_if_needed()
+#         if waited:
+#             logger.info(f"         Resumed after rate limit wait")
+        
+#         # Log request details (but not sensitive params)
+#         safe_params = {k: v for k, v in (params or {}).items() if k not in ['client_secret', 'access_token']}
+#         logger.debug(f"         API GET: {endpoint} {safe_params}")
+        
+#         try:
+#             async with self.session.get(url, headers=self.headers, params=params) as response:
+#                 request_time = time.time() - request_start
+                
+#                 # Update rate limit tracker from response headers
+#                 _rate_limit_tracker.update_from_headers(dict(response.headers))
+                
+#                 if response.status == 429:
+#                     # Use X-Rate-Limit-Reset if available, otherwise fall back to Retry-After
+#                     reset_timestamp = response.headers.get('X-Rate-Limit-Reset')
+#                     if reset_timestamp:
+#                         reset_time = int(reset_timestamp)
+#                         current_time = time.time()
+#                         wait_seconds = max(0, reset_time - current_time)
+#                         logger.warning(f"         ⚠ Rate limited. Waiting {wait_seconds:.0f}s until reset at {datetime.fromtimestamp(reset_time).strftime('%H:%M:%S')} (request took {request_time:.2f}s)")
+#                         if wait_seconds > 0:
+#                             await asyncio.sleep(wait_seconds)
+#                     else:
+#                         retry_after = int(response.headers.get('Retry-After', 60))
+#                         logger.warning(f"         ⚠ Rate limited. Waiting {retry_after}s (request took {request_time:.2f}s)")
+#                         await asyncio.sleep(retry_after)
+#                     raise aiohttp.ClientError("Rate limited")
+                
+#                 # Don't raise for 401/403 - let caller handle auth errors
+#                 if response.status in [401, 403]:
+#                     error_text = await response.text()
+#                     logger.warning(f"         ⚠ Auth error {response.status} for {endpoint}: {error_text[:100]} (took {request_time:.2f}s)")
+#                     error = aiohttp.ClientResponseError(
+#                         request_info=response.request_info,
+#                         history=response.history,
+#                         status=response.status,
+#                         message=error_text
+#                     )
+#                     raise error
+                
+#                 response.raise_for_status()
+                
+#                 # Try to parse JSON
+#                 try:
+#                     result = await response.json()
+#                     logger.debug(f"         ✓ API GET: {endpoint} - {len(str(result))} bytes (took {request_time:.2f}s)")
+#                     return result
+#                 except Exception as json_error:
+#                     text = await response.text()
+#                     logger.error(f"         ✗ Failed to parse JSON response: {json_error}. Response: {text[:200]} (took {request_time:.2f}s)")
+#                     raise aiohttp.ClientError(f"Invalid JSON response: {str(json_error)}")
+                    
+#         except aiohttp.ClientResponseError as e:
+#             # Re-raise HTTP errors (401, 403, 404, etc.)
+#             request_time = time.time() - request_start
+#             logger.error(f"         ✗ HTTP {e.status} error for {endpoint} (took {request_time:.2f}s): {e.message[:100]}")
+#             raise
+#         except Exception as e:
+#             request_time = time.time() - request_start
+#             logger.error(f"         ✗ GET request failed for {endpoint} (took {request_time:.2f}s): {type(e).__name__}: {e}")
+#             raise
+    
+#     @retry(
+#         stop=stop_after_attempt(3),
+#         wait=wait_exponential(multiplier=1, min=2, max=10),
+#         retry=retry_if_exception_type((aiohttp.ClientError, asyncio.TimeoutError))
+#     )
+#     async def post(self, endpoint: str, json: Optional[Dict] = None, params: Optional[Dict] = None) -> Any:
+#         """Make POST request with retry logic and rate limit tracking."""
+#         await self._ensure_session()
+#         url = f"{self.base_url}{endpoint}"
+#         request_start = time.time()
+        
+#         # Check rate limit before making request
+#         waited = await _rate_limit_tracker.check_and_wait_if_needed()
+#         if waited:
+#             logger.info(f"         Resumed after rate limit wait")
+        
+#         logger.debug(f"         API POST: {endpoint}")
+        
+#         try:
+#             headers = self.headers.copy()
+#             headers["Content-Type"] = "application/json"
+            
+#             async with self.session.post(url, headers=headers, json=json, params=params) as response:
+#                 request_time = time.time() - request_start
+                
+#                 # Update rate limit tracker from response headers
+#                 _rate_limit_tracker.update_from_headers(dict(response.headers))
+                
+#                 if response.status == 429:
+#                     # Use X-Rate-Limit-Reset if available, otherwise fall back to Retry-After
+#                     reset_timestamp = response.headers.get('X-Rate-Limit-Reset')
+#                     if reset_timestamp:
+#                         reset_time = int(reset_timestamp)
+#                         current_time = time.time()
+#                         wait_seconds = max(0, reset_time - current_time)
+#                         logger.warning(f"         ⚠ Rate limited. Waiting {wait_seconds:.0f}s until reset at {datetime.fromtimestamp(reset_time).strftime('%H:%M:%S')} (request took {request_time:.2f}s)")
+#                         if wait_seconds > 0:
+#                             await asyncio.sleep(wait_seconds)
+#                     else:
+#                         retry_after = int(response.headers.get('Retry-After', 60))
+#                         logger.warning(f"         ⚠ Rate limited. Waiting {retry_after}s (request took {request_time:.2f}s)")
+#                         await asyncio.sleep(retry_after)
+#                     raise aiohttp.ClientError("Rate limited")
+                
+#                 # Don't raise for 401/403 - let caller handle auth errors
+#                 if response.status in [401, 403]:
+#                     error_text = await response.text()
+#                     logger.warning(f"         ⚠ Auth error {response.status} for {endpoint}: {error_text[:100]} (took {request_time:.2f}s)")
+#                     error = aiohttp.ClientResponseError(
+#                         request_info=response.request_info,
+#                         history=response.history,
+#                         status=response.status,
+#                         message=error_text
+#                     )
+#                     raise error
+                
+#                 response.raise_for_status()
+                
+#                 # Try to parse JSON
+#                 try:
+#                     result = await response.json()
+#                     logger.debug(f"         ✓ API POST: {endpoint} - {len(str(result))} bytes (took {request_time:.2f}s)")
+#                     return result
+#                 except Exception as json_error:
+#                     text = await response.text()
+#                     logger.error(f"         ✗ Failed to parse JSON response: {json_error}. Response: {text[:200]} (took {request_time:.2f}s)")
+#                     raise aiohttp.ClientError(f"Invalid JSON response: {str(json_error)}")
+                    
+#         except aiohttp.ClientResponseError as e:
+#             request_time = time.time() - request_start
+#             logger.error(f"         ✗ HTTP {e.status} error for {endpoint} (took {request_time:.2f}s): {e.message[:100]}")
+#             raise
+#         except Exception as e:
+#             request_time = time.time() - request_start
+#             logger.error(f"         ✗ POST request failed for {endpoint} (took {request_time:.2f}s): {type(e).__name__}: {e}")
+#             raise
+    
+#     async def generate_pdf_with_markups(self, project_id: int, revision_id: int, layer_ids: List[int]) -> str:
+#         """
+#         Generate and download a PDF with markups using Procore's API.
+#         Returns the download URL.
+#         """
+#         endpoint = f"/rest/v1.0/projects/{project_id}/drawing_revisions/{revision_id}/pdf_download_pages"
+        
+#         payload = {
+#             "pdf_download_page": {
+#                 "markup_layer_ids": layer_ids,
+#                 "filtered_types": [],
+#                 "filtered_items": {
+#                     "GenericToolItem": {
+#                         "generic_tool_id": []
+#                     }
+#                 }
+#             }
+#         }
+        
+#         logger.info(f"         Requesting pre-rendered PDF from Procore (revision {revision_id}, {len(layer_ids)} layers)...")
+#         response_data = await self.post(endpoint, json=payload)
+#         download_url = response_data.get('url')
+        
+#         if not download_url:
+#             raise Exception("Procore API returned success but no download URL found")
+        
+#         logger.debug(f"         ✓ Got PDF URL from Procore")
+#         return download_url
+    
+#     async def download_file(self, url: str, destination: str) -> bool:
+#         """Download a file from URL."""
+#         await self._ensure_session()
+#         download_start = time.time()
+        
+#         try:
+#             async with self.session.get(url) as response:
+#                 response.raise_for_status()
+#                 content_length = response.headers.get('Content-Length')
+#                 if content_length:
+#                     logger.debug(f"         Downloading {int(content_length) / 1024:.1f} KB...")
+                
+#                 bytes_downloaded = 0
+#                 with open(destination, 'wb') as f:
+#                     while True:
+#                         chunk = await response.content.read(8192)
+#                         if not chunk:
+#                             break
+#                         f.write(chunk)
+#                         bytes_downloaded += len(chunk)
+                
+#                 download_time = time.time() - download_start
+#                 file_size_kb = bytes_downloaded / 1024
+#                 logger.debug(f"         ✓ Downloaded {file_size_kb:.1f} KB in {download_time:.2f}s ({file_size_kb/download_time:.1f} KB/s)")
+#                 return True
+#         except Exception as e:
+#             download_time = time.time() - download_start
+#             logger.error(f"         ✗ Download failed after {download_time:.2f}s: {type(e).__name__}: {e}")
+#             return False
+    
+#     async def close(self):
+#         """Close the session."""
+#         if self.session:
+#             await self.session.close()
+
+
 class AsyncProcoreClient:
-    """Async client for Procore API calls."""
+    """Async client for Procore API calls with persistent connections."""
     
     def __init__(self, access_token: str, company_id: int):
         self.access_token = access_token
@@ -605,37 +1071,52 @@ class AsyncProcoreClient:
             "Accept": "application/json"
         }
         self.session: Optional[aiohttp.ClientSession] = None
+        # FIX: Initialize the SSL context here so _ensure_session can use it
+        self.ssl_context = self._create_ssl_context()
     
-    async def _ensure_session(self):
-        """Ensure session is created."""
-        if not self.session:
+    def _create_ssl_context(self):
+        """Create SSL context with proper certificate handling."""
             import ssl
-            timeout = aiohttp.ClientTimeout(total=settings.DOWNLOAD_TIMEOUT)
             
-            # Create SSL context with proper certificate handling
             ssl_context = ssl.create_default_context()
             
-            # Try to use certifi certificates if available
+        # Try to use certifi certificates
             try:
                 import certifi
                 ssl_context = ssl.create_default_context(cafile=certifi.where())
-                logger.info("Using certifi SSL certificates")
+            logger.info("ProcoreDocManager: Using certifi SSL certificates")
             except ImportError:
-                logger.warning("certifi not available, using system certificates")
+            logger.warning("ProcoreDocManager: certifi not available, using system certificates")
             except Exception as ssl_error:
-                logger.error(f"SSL configuration error: {ssl_error}")
+            logger.error(f"ProcoreDocManager: SSL configuration error: {ssl_error}")
                 
                 # Development fallback: disable SSL verification
                 if settings.ENVIRONMENT == "development":
-                    logger.warning("⚠️  SSL VERIFICATION DISABLED (DEVELOPMENT ONLY)")
-                    logger.warning("⚠️  Fix by running: /Applications/Python\\ 3.14/Install\\ Certificates.command")
+                logger.warning("⚠️  ProcoreDocManager: SSL VERIFICATION DISABLED (DEVELOPMENT ONLY)")
                     ssl_context.check_hostname = False
                     ssl_context.verify_mode = ssl.CERT_NONE
                 else:
-                    # Production: don't disable SSL
-                    raise Exception("SSL certificate verification failed. Install certificates: pip install --upgrade certifi")
+                raise Exception("SSL certificate verification failed. Run: pip install --upgrade certifi")
+
+        return ssl_context
+
+    async def _ensure_session(self):
+        """Ensure persistent session is created with Keep-Alive."""
+        if not self.session or self.session.closed:
+            # Configure TCP Connector for Persistent Connections
+            connector = aiohttp.TCPConnector(
+                ssl=self.ssl_context,     # Now this attribute exists!
+                limit=10,
+                limit_per_host=10,
+                enable_cleanup_closed=True,
+                force_close=False,        # Keep-Alive enabled
+                keepalive_timeout=60,
+                ttl_dns_cache=300
+            )
             
-            connector = aiohttp.TCPConnector(ssl=ssl_context)
+            # Standard timeout for API calls
+            timeout = aiohttp.ClientTimeout(total=settings.DOWNLOAD_TIMEOUT, connect=60)
+            
             self.session = aiohttp.ClientSession(
                 timeout=timeout,
                 connector=connector
@@ -647,218 +1128,107 @@ class AsyncProcoreClient:
         retry=retry_if_exception_type((aiohttp.ClientError, asyncio.TimeoutError))
     )
     async def get(self, endpoint: str, params: Optional[Dict] = None) -> Any:
-        """Make GET request with retry logic and rate limit tracking."""
+        """Make GET request with retry logic and connection reuse."""
         await self._ensure_session()
         url = f"{self.base_url}{endpoint}"
-        request_start = time.time()
         
-        # Check rate limit before making request
+        # Rate limit check
         waited = await _rate_limit_tracker.check_and_wait_if_needed()
         if waited:
-            logger.info(f"         Resumed after rate limit wait")
-        
-        # Log request details (but not sensitive params)
-        safe_params = {k: v for k, v in (params or {}).items() if k not in ['client_secret', 'access_token']}
-        logger.debug(f"         API GET: {endpoint} {safe_params}")
+            logger.info(f"          Resumed after rate limit wait")
         
         try:
             async with self.session.get(url, headers=self.headers, params=params) as response:
-                request_time = time.time() - request_start
-                
-                # Update rate limit tracker from response headers
+                # Update tracker
                 _rate_limit_tracker.update_from_headers(dict(response.headers))
                 
                 if response.status == 429:
-                    # Use X-Rate-Limit-Reset if available, otherwise fall back to Retry-After
-                    reset_timestamp = response.headers.get('X-Rate-Limit-Reset')
-                    if reset_timestamp:
-                        reset_time = int(reset_timestamp)
-                        current_time = time.time()
-                        wait_seconds = max(0, reset_time - current_time)
-                        logger.warning(f"         ⚠ Rate limited. Waiting {wait_seconds:.0f}s until reset at {datetime.fromtimestamp(reset_time).strftime('%H:%M:%S')} (request took {request_time:.2f}s)")
-                        if wait_seconds > 0:
-                            await asyncio.sleep(wait_seconds)
-                    else:
-                        retry_after = int(response.headers.get('Retry-After', 60))
-                        logger.warning(f"         ⚠ Rate limited. Waiting {retry_after}s (request took {request_time:.2f}s)")
-                        await asyncio.sleep(retry_after)
+                    retry_after = int(response.headers.get('Retry-After', 60))
+                    logger.warning(f"Rate limited. Waiting {retry_after}s")
+                    await asyncio.sleep(retry_after)
                     raise aiohttp.ClientError("Rate limited")
                 
-                # Don't raise for 401/403 - let caller handle auth errors
                 if response.status in [401, 403]:
-                    error_text = await response.text()
-                    logger.warning(f"         ⚠ Auth error {response.status} for {endpoint}: {error_text[:100]} (took {request_time:.2f}s)")
-                    error = aiohttp.ClientResponseError(
-                        request_info=response.request_info,
-                        history=response.history,
-                        status=response.status,
-                        message=error_text
+                    text = await response.text()
+                    raise aiohttp.ClientResponseError(
+                        response.request_info, response.history,
+                        status=response.status, message=text
                     )
-                    raise error
                 
                 response.raise_for_status()
+                return await response.json()
                 
-                # Try to parse JSON
-                try:
-                    result = await response.json()
-                    logger.debug(f"         ✓ API GET: {endpoint} - {len(str(result))} bytes (took {request_time:.2f}s)")
-                    return result
-                except Exception as json_error:
-                    text = await response.text()
-                    logger.error(f"         ✗ Failed to parse JSON response: {json_error}. Response: {text[:200]} (took {request_time:.2f}s)")
-                    raise aiohttp.ClientError(f"Invalid JSON response: {str(json_error)}")
-                    
-        except aiohttp.ClientResponseError as e:
-            # Re-raise HTTP errors (401, 403, 404, etc.)
-            request_time = time.time() - request_start
-            logger.error(f"         ✗ HTTP {e.status} error for {endpoint} (took {request_time:.2f}s): {e.message[:100]}")
-            raise
         except Exception as e:
-            request_time = time.time() - request_start
-            logger.error(f"         ✗ GET request failed for {endpoint} (took {request_time:.2f}s): {type(e).__name__}: {e}")
+            logger.error(f"API GET failed: {endpoint} - {str(e)}")
             raise
-    
+
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=2, max=10),
         retry=retry_if_exception_type((aiohttp.ClientError, asyncio.TimeoutError))
     )
     async def post(self, endpoint: str, json: Optional[Dict] = None, params: Optional[Dict] = None) -> Any:
-        """Make POST request with retry logic and rate limit tracking."""
+        """Make POST request with retry logic and connection reuse."""
         await self._ensure_session()
         url = f"{self.base_url}{endpoint}"
-        request_start = time.time()
         
-        # Check rate limit before making request
-        waited = await _rate_limit_tracker.check_and_wait_if_needed()
-        if waited:
-            logger.info(f"         Resumed after rate limit wait")
-        
-        logger.debug(f"         API POST: {endpoint}")
+        # Rate limit check
+        await _rate_limit_tracker.check_and_wait_if_needed()
         
         try:
             headers = self.headers.copy()
             headers["Content-Type"] = "application/json"
             
             async with self.session.post(url, headers=headers, json=json, params=params) as response:
-                request_time = time.time() - request_start
-                
-                # Update rate limit tracker from response headers
                 _rate_limit_tracker.update_from_headers(dict(response.headers))
                 
                 if response.status == 429:
-                    # Use X-Rate-Limit-Reset if available, otherwise fall back to Retry-After
-                    reset_timestamp = response.headers.get('X-Rate-Limit-Reset')
-                    if reset_timestamp:
-                        reset_time = int(reset_timestamp)
-                        current_time = time.time()
-                        wait_seconds = max(0, reset_time - current_time)
-                        logger.warning(f"         ⚠ Rate limited. Waiting {wait_seconds:.0f}s until reset at {datetime.fromtimestamp(reset_time).strftime('%H:%M:%S')} (request took {request_time:.2f}s)")
-                        if wait_seconds > 0:
-                            await asyncio.sleep(wait_seconds)
-                    else:
-                        retry_after = int(response.headers.get('Retry-After', 60))
-                        logger.warning(f"         ⚠ Rate limited. Waiting {retry_after}s (request took {request_time:.2f}s)")
-                        await asyncio.sleep(retry_after)
+                    retry_after = int(response.headers.get('Retry-After', 60))
+                    await asyncio.sleep(retry_after)
                     raise aiohttp.ClientError("Rate limited")
                 
-                # Don't raise for 401/403 - let caller handle auth errors
-                if response.status in [401, 403]:
-                    error_text = await response.text()
-                    logger.warning(f"         ⚠ Auth error {response.status} for {endpoint}: {error_text[:100]} (took {request_time:.2f}s)")
-                    error = aiohttp.ClientResponseError(
-                        request_info=response.request_info,
-                        history=response.history,
-                        status=response.status,
-                        message=error_text
-                    )
-                    raise error
-                
                 response.raise_for_status()
-                
-                # Try to parse JSON
-                try:
-                    result = await response.json()
-                    logger.debug(f"         ✓ API POST: {endpoint} - {len(str(result))} bytes (took {request_time:.2f}s)")
-                    return result
-                except Exception as json_error:
-                    text = await response.text()
-                    logger.error(f"         ✗ Failed to parse JSON response: {json_error}. Response: {text[:200]} (took {request_time:.2f}s)")
-                    raise aiohttp.ClientError(f"Invalid JSON response: {str(json_error)}")
+                    return await response.json()
                     
-        except aiohttp.ClientResponseError as e:
-            request_time = time.time() - request_start
-            logger.error(f"         ✗ HTTP {e.status} error for {endpoint} (took {request_time:.2f}s): {e.message[:100]}")
-            raise
         except Exception as e:
-            request_time = time.time() - request_start
-            logger.error(f"         ✗ POST request failed for {endpoint} (took {request_time:.2f}s): {type(e).__name__}: {e}")
+            logger.error(f"API POST failed: {endpoint} - {str(e)}")
             raise
     
     async def generate_pdf_with_markups(self, project_id: int, revision_id: int, layer_ids: List[int]) -> str:
-        """
-        Generate and download a PDF with markups using Procore's API.
-        Returns the download URL.
-        """
+        """Generate and download a PDF with markups."""
         endpoint = f"/rest/v1.0/projects/{project_id}/drawing_revisions/{revision_id}/pdf_download_pages"
-        
         payload = {
             "pdf_download_page": {
                 "markup_layer_ids": layer_ids,
                 "filtered_types": [],
-                "filtered_items": {
-                    "GenericToolItem": {
-                        "generic_tool_id": []
-                    }
-                }
+                "filtered_items": {"GenericToolItem": {"generic_tool_id": []}}
             }
         }
         
-        logger.info(f"         Requesting pre-rendered PDF from Procore (revision {revision_id}, {len(layer_ids)} layers)...")
+        logger.info(f"          Requesting PDF (rev {revision_id})...")
         response_data = await self.post(endpoint, json=payload)
-        download_url = response_data.get('url')
-        
-        if not download_url:
-            raise Exception("Procore API returned success but no download URL found")
-        
-        logger.debug(f"         ✓ Got PDF URL from Procore")
-        return download_url
+        return response_data.get('url')
     
     async def download_file(self, url: str, destination: str) -> bool:
-        """Download a file from URL."""
+        """Download file using the persistent session."""
         await self._ensure_session()
-        download_start = time.time()
         
         try:
             async with self.session.get(url) as response:
                 response.raise_for_status()
-                content_length = response.headers.get('Content-Length')
-                if content_length:
-                    logger.debug(f"         Downloading {int(content_length) / 1024:.1f} KB...")
-                
-                bytes_downloaded = 0
                 with open(destination, 'wb') as f:
                     while True:
                         chunk = await response.content.read(8192)
-                        if not chunk:
-                            break
+                        if not chunk: break
                         f.write(chunk)
-                        bytes_downloaded += len(chunk)
-                
-                download_time = time.time() - download_start
-                file_size_kb = bytes_downloaded / 1024
-                logger.debug(f"         ✓ Downloaded {file_size_kb:.1f} KB in {download_time:.2f}s ({file_size_kb/download_time:.1f} KB/s)")
                 return True
         except Exception as e:
-            download_time = time.time() - download_start
-            logger.error(f"         ✗ Download failed after {download_time:.2f}s: {type(e).__name__}: {e}")
+            logger.error(f"          ✗ Download failed: {str(e)}")
             return False
     
     async def close(self):
-        """Close the session."""
         if self.session:
             await self.session.close()
-
 
 # ---------------------------------------------------------
 # SECTION 3: FOLDER FINDERS
@@ -880,12 +1250,9 @@ async def get_target_combined_folder(project_id: int, access_token: str) -> tupl
     
     try:
         # 1. Get Root folders
-        try:
-            data = await client.get(f"/rest/v1.0/projects/{project_id}/folders")
-            root_folders = data if isinstance(data, list) else data.get('folders', [])
-        except:
-            data = await client.get("/rest/v1.0/folders", params={"project_id": project_id})
-            root_folders = data if isinstance(data, list) else data.get('folders', [])
+        # Note: Procore API uses /rest/v1.0/folders with project_id as query param, not /projects/{id}/folders
+        data = await client.get("/rest/v1.0/folders", params={"project_id": project_id})
+        root_folders = data if isinstance(data, list) else data.get('folders', [])
 
         # 2. Find Drawing & Specs
         drawing_specs = find_folder_by_name_pattern(root_folders, ["drawing", "specs"])
@@ -975,17 +1342,17 @@ async def download_and_process_drawing(
 
         # Fetch markup layers to get layer IDs
         logger.debug(f"         Fetching markup layers for {d_num}...")
-        m_params = {
-            "project_id": project_id,
-            "holder_id": revision_id,
-            "holder_type": "DrawingRevision",
-            "page": 1,
-            "page_size": 200
-        }
+            m_params = {
+                "project_id": project_id,
+                "holder_id": revision_id,
+                "holder_type": "DrawingRevision",
+                "page": 1,
+                "page_size": 200
+            }
             
-        try:
+            try:
             markup_start = time.time()
-            markup_data = await client.get("/rest/v1.0/markup_layers", params=m_params)
+                markup_data = await client.get("/rest/v1.0/markup_layers", params=m_params)
             markup_time = time.time() - markup_start
             
             # Extract layer IDs
@@ -1016,7 +1383,7 @@ async def download_and_process_drawing(
             file_size = os.path.getsize(filename) / 1024  # KB
             logger.info(f"         ✓ Downloaded {d_num} with markups ({file_size:.1f} KB, took {download_time:.2f}s)")
             
-        except Exception as e:
+            except Exception as e:
             logger.error(f"         ✗ Failed to get pre-rendered PDF for {d_num}: {type(e).__name__}: {str(e)}")
             raise  # Re-raise to fail the job as per requirements
         
@@ -2100,240 +2467,393 @@ def cleanup_old_pdfs(max_files: int = 20):
         logger.warning(f"         Error during PDF cleanup: {e}")
 
 
+# def merge_pdfs(files_to_merge: List[Dict], project_name: str, temp_dir: str) -> tuple[str, int]:
+#     """
+#     Merge PDFs with TOC (memory-efficient for large batches).
+#     Uses batch processing to stay within memory limits (e.g., Render.com 512MB).
+#     Returns: (final_output_path, actual_page_count)
+#     """
+#     merge_start = time.time()
+#     logger.info(f"         Starting PDF merge process...")
+#     logger.info(f"         Files to merge: {len(files_to_merge)}")
+    
+#     # Clean up old PDFs before merging to ensure we have space
+#     logger.debug(f"         Cleaning up old PDFs (keeping last 20)...")
+#     cleanup_old_pdfs(max_files=20)
+    
+#     # Generate filename (without date - date will be added when archived)
+#     clean_proj = re.sub(r'[^a-zA-Z0-9]', '_', project_name)
+#     final_filename = f"{clean_proj}_Merged.pdf"
+#     final_output_path = os.path.join("output", final_filename)
+    
+#     # For large batches (>50 files), use batch processing to save memory
+#     # Process in chunks of 50 files at a time, saving intermediate results
+#     BATCH_SIZE = 50
+#     use_batch_processing = len(files_to_merge) > BATCH_SIZE
+    
+#     if use_batch_processing:
+#         logger.info(f"         Using batch processing (chunks of {BATCH_SIZE}) to manage memory...")
+#         return _merge_pdfs_batch(files_to_merge, final_output_path, temp_dir, BATCH_SIZE, merge_start)
+#     else:
+#         # For smaller batches, use the original method
+#         return _merge_pdfs_single_pass(files_to_merge, final_output_path, temp_dir, merge_start)
+
+
+# def _merge_pdfs_single_pass(files_to_merge: List[Dict], final_output_path: str, temp_dir: str, merge_start: float) -> tuple[str, int]:
+#     """Original single-pass merge for smaller batches."""
+#     merged_doc = pymupdf.open()
+#     toc = []
+#     current_discipline = None
+#     pages_added = 0
+#     files_merged = 0
+    
+#     for idx, item in enumerate(files_to_merge, start=1):
+#         try:
+#             logger.debug(f"         [{idx}/{len(files_to_merge)}] Merging: {item.get('title', 'Unknown')}")
+#             file_start = time.time()
+#             doc_single = pymupdf.open(item['path'])
+#             page_count = len(doc_single)
+            
+#             # Add discipline header to TOC
+#             if item['discipline'] != current_discipline:
+#                 toc.append([1, item['discipline'], len(merged_doc) + 1])
+#                 current_discipline = item['discipline']
+#                 logger.debug(f"           Discipline section: {item['discipline']}")
+            
+#             # Add drawing to TOC
+#             toc.append([2, item['title'], len(merged_doc) + 1])
+            
+#             # Insert pages
+#             merged_doc.insert_pdf(doc_single)
+#             pages_added += page_count
+#             files_merged += 1
+#             doc_single.close()
+            
+#             file_time = time.time() - file_start
+#             logger.debug(f"           ✓ Added {page_count} page(s) (took {file_time:.2f}s)")
+#         except Exception as e:
+#             logger.warning(f"         [{idx}/{len(files_to_merge)}] ✗ Could not merge {item.get('path', 'Unknown')}: {type(e).__name__}: {str(e)}")
+#             continue
+    
+#     logger.info(f"         Setting table of contents ({len(toc)} entries)...")
+#     merged_doc.set_toc(toc)
+    
+#     logger.info(f"         Saving merged PDF...")
+#     save_start = time.time()
+#     merged_doc.save(final_output_path, garbage=4, deflate=True)
+#     save_time = time.time() - save_start
+    
+#     # Verify the saved PDF page count
+#     actual_page_count = len(merged_doc)
+#     merged_doc.close()
+    
+#     # Double-check by reopening the saved file
+#     verify_doc = pymupdf.open(final_output_path)
+#     verified_page_count = len(verify_doc)
+#     verify_doc.close()
+    
+#     if verified_page_count != actual_page_count:
+#         logger.warning(f"         ⚠ Page count mismatch: Document shows {actual_page_count} but saved file has {verified_page_count}")
+#         actual_page_count = verified_page_count
+    
+#     final_size = os.path.getsize(final_output_path) / (1024 * 1024)  # MB
+#     logger.info(f"         ✓ Saved ({final_size:.2f} MB, {actual_page_count} pages, took {save_time:.2f}s)")
+    
+#     _cleanup_after_merge(temp_dir, files_merged, len(files_to_merge), actual_page_count, merge_start)
+    
+#     return final_output_path, actual_page_count
+
+
+# def _merge_pdfs_batch(files_to_merge: List[Dict], final_output_path: str, temp_dir: str, batch_size: int, merge_start: float) -> tuple[str, int]:
+#     """
+#     Memory-efficient batch merging for large PDF collections.
+#     Processes files in batches, saving intermediate results to disk.
+#     """
+#     import gc
+    
+#     # Create temporary directory for intermediate files
+#     intermediate_dir = os.path.join(temp_dir, "merge_intermediate")
+#     os.makedirs(intermediate_dir, exist_ok=True)
+    
+#     toc = []
+#     current_discipline = None
+#     total_pages = 0
+#     files_merged = 0
+#     batch_files = []
+    
+#     # Process files in batches
+#     num_batches = (len(files_to_merge) + batch_size - 1) // batch_size
+    
+#     for batch_num in range(num_batches):
+#         batch_start_idx = batch_num * batch_size
+#         batch_end_idx = min(batch_start_idx + batch_size, len(files_to_merge))
+#         batch_items = files_to_merge[batch_start_idx:batch_end_idx]
+        
+#         logger.info(f"         Processing batch {batch_num + 1}/{num_batches} (files {batch_start_idx + 1}-{batch_end_idx})...")
+        
+#         # Create a new document for this batch
+#         batch_doc = pymupdf.open()
+#         batch_toc = []
+#         batch_current_discipline = current_discipline
+#         batch_pages = 0
+        
+#         for idx, item in enumerate(batch_items, start=batch_start_idx + 1):
+#             try:
+#                 logger.debug(f"         [{idx}/{len(files_to_merge)}] Merging: {item.get('title', 'Unknown')}")
+#                 file_start = time.time()
+#                 doc_single = pymupdf.open(item['path'])
+#                 page_count = len(doc_single)
+                
+#                 # Add discipline header to TOC (tracking offset from previous batches)
+#                 if item['discipline'] != batch_current_discipline:
+#                     batch_toc.append([1, item['discipline'], len(batch_doc) + total_pages + 1])
+#                     batch_current_discipline = item['discipline']
+#                     current_discipline = batch_current_discipline
+#                     logger.debug(f"           Discipline section: {item['discipline']}")
+                
+#                 # Add drawing to TOC
+#                 batch_toc.append([2, item['title'], len(batch_doc) + total_pages + 1])
+                
+#                 # Insert pages
+#                 batch_doc.insert_pdf(doc_single)
+#                 batch_pages += page_count
+#                 files_merged += 1
+#                 doc_single.close()
+                
+#                 file_time = time.time() - file_start
+#                 logger.debug(f"           ✓ Added {page_count} page(s) (took {file_time:.2f}s)")
+#             except Exception as e:
+#                 logger.warning(f"         [{idx}/{len(files_to_merge)}] ✗ Could not merge {item.get('path', 'Unknown')}: {type(e).__name__}: {str(e)}")
+#                 continue
+        
+#         # Save this batch to a temporary file
+#         batch_filename = os.path.join(intermediate_dir, f"batch_{batch_num + 1}.pdf")
+#         logger.debug(f"         Saving batch {batch_num + 1} to intermediate file...")
+#         batch_doc.save(batch_filename, garbage=4, deflate=True)
+#         batch_doc.close()
+        
+#         # Add batch TOC entries to main TOC
+#         toc.extend(batch_toc)
+#         total_pages += batch_pages
+#         batch_files.append(batch_filename)
+        
+#         # Force garbage collection to free memory
+#         gc.collect()
+#         logger.info(f"         ✓ Batch {batch_num + 1} complete: {batch_pages} pages (total so far: {total_pages})")
+    
+#     # Now merge all batch files into final document
+#     logger.info(f"         Merging {len(batch_files)} batch files into final document...")
+#     final_doc = pymupdf.open()
+    
+#     for batch_idx, batch_file in enumerate(batch_files):
+#         try:
+#             logger.debug(f"         Merging batch file {batch_idx + 1}/{len(batch_files)}...")
+#             batch_doc = pymupdf.open(batch_file)
+#             final_doc.insert_pdf(batch_doc)
+#             batch_doc.close()
+            
+#             # Clean up intermediate file immediately
+#             try:
+#                 os.remove(batch_file)
+#             except:
+#                 pass
+            
+#             # Force garbage collection
+#             gc.collect()
+#         except Exception as e:
+#             logger.warning(f"         ✗ Could not merge batch file {batch_file}: {type(e).__name__}: {str(e)}")
+#             continue
+    
+#     # Set final TOC
+#     logger.info(f"         Setting table of contents ({len(toc)} entries)...")
+#     final_doc.set_toc(toc)
+    
+#     # Save final document
+#     logger.info(f"         Saving final merged PDF...")
+#     save_start = time.time()
+#     final_doc.save(final_output_path, garbage=4, deflate=True)
+#     save_time = time.time() - save_start
+    
+#     # Verify the saved PDF page count
+#     actual_page_count = len(final_doc)
+#     final_doc.close()
+    
+#     # Double-check by reopening the saved file
+#     verify_doc = pymupdf.open(final_output_path)
+#     verified_page_count = len(verify_doc)
+#     verify_doc.close()
+    
+#     if verified_page_count != actual_page_count:
+#         logger.warning(f"         ⚠ Page count mismatch: Document shows {actual_page_count} but saved file has {verified_page_count}")
+#         actual_page_count = verified_page_count
+    
+#     # Clean up any remaining intermediate files
+#     try:
+#         shutil.rmtree(intermediate_dir)
+#     except:
+#         pass
+    
+#     final_size = os.path.getsize(final_output_path) / (1024 * 1024)  # MB
+#     logger.info(f"         ✓ Saved ({final_size:.2f} MB, {actual_page_count} pages, took {save_time:.2f}s)")
+    
+#     _cleanup_after_merge(temp_dir, files_merged, len(files_to_merge), actual_page_count, merge_start)
+    
+#     return final_output_path, actual_page_count
+
 def merge_pdfs(files_to_merge: List[Dict], project_name: str, temp_dir: str) -> tuple[str, int]:
     """
-    Merge PDFs with TOC (memory-efficient for large batches).
-    Uses batch processing to stay within memory limits (e.g., Render.com 512MB).
-    Returns: (final_output_path, actual_page_count)
-    """
-    merge_start = time.time()
-    logger.info(f"         Starting PDF merge process...")
-    logger.info(f"         Files to merge: {len(files_to_merge)}")
-    
-    # Clean up old PDFs before merging to ensure we have space
-    logger.debug(f"         Cleaning up old PDFs (keeping last 20)...")
-    cleanup_old_pdfs(max_files=20)
-    
-    # Generate filename
-    clean_proj = re.sub(r'[^a-zA-Z0-9]', '_', project_name)
-    date_str = datetime.now().strftime("%d_%m_%y")
-    final_filename = f"{clean_proj}_Merged_{date_str}.pdf"
-    final_output_path = os.path.join("output", final_filename)
-    
-    # For large batches (>50 files), use batch processing to save memory
-    # Process in chunks of 50 files at a time, saving intermediate results
-    BATCH_SIZE = 50
-    use_batch_processing = len(files_to_merge) > BATCH_SIZE
-    
-    if use_batch_processing:
-        logger.info(f"         Using batch processing (chunks of {BATCH_SIZE}) to manage memory...")
-        return _merge_pdfs_batch(files_to_merge, final_output_path, temp_dir, BATCH_SIZE, merge_start)
-    else:
-        # For smaller batches, use the original method
-        return _merge_pdfs_single_pass(files_to_merge, final_output_path, temp_dir, merge_start)
-
-
-def _merge_pdfs_single_pass(files_to_merge: List[Dict], final_output_path: str, temp_dir: str, merge_start: float) -> tuple[str, int]:
-    """Original single-pass merge for smaller batches."""
-    merged_doc = pymupdf.open()
-    toc = []
-    current_discipline = None
-    pages_added = 0
-    files_merged = 0
-    
-    for idx, item in enumerate(files_to_merge, start=1):
-        try:
-            logger.debug(f"         [{idx}/{len(files_to_merge)}] Merging: {item.get('title', 'Unknown')}")
-            file_start = time.time()
-            doc_single = pymupdf.open(item['path'])
-            page_count = len(doc_single)
-            
-            # Add discipline header to TOC
-            if item['discipline'] != current_discipline:
-                toc.append([1, item['discipline'], len(merged_doc) + 1])
-                current_discipline = item['discipline']
-                logger.debug(f"           Discipline section: {item['discipline']}")
-            
-            # Add drawing to TOC
-            toc.append([2, item['title'], len(merged_doc) + 1])
-            
-            # Insert pages
-            merged_doc.insert_pdf(doc_single)
-            pages_added += page_count
-            files_merged += 1
-            doc_single.close()
-            
-            file_time = time.time() - file_start
-            logger.debug(f"           ✓ Added {page_count} page(s) (took {file_time:.2f}s)")
-        except Exception as e:
-            logger.warning(f"         [{idx}/{len(files_to_merge)}] ✗ Could not merge {item.get('path', 'Unknown')}: {type(e).__name__}: {str(e)}")
-            continue
-    
-    logger.info(f"         Setting table of contents ({len(toc)} entries)...")
-    merged_doc.set_toc(toc)
-    
-    logger.info(f"         Saving merged PDF...")
-    save_start = time.time()
-    merged_doc.save(final_output_path, garbage=4, deflate=True)
-    save_time = time.time() - save_start
-    
-    # Verify the saved PDF page count
-    actual_page_count = len(merged_doc)
-    merged_doc.close()
-    
-    # Double-check by reopening the saved file
-    verify_doc = pymupdf.open(final_output_path)
-    verified_page_count = len(verify_doc)
-    verify_doc.close()
-    
-    if verified_page_count != actual_page_count:
-        logger.warning(f"         ⚠ Page count mismatch: Document shows {actual_page_count} but saved file has {verified_page_count}")
-        actual_page_count = verified_page_count
-    
-    final_size = os.path.getsize(final_output_path) / (1024 * 1024)  # MB
-    logger.info(f"         ✓ Saved ({final_size:.2f} MB, {actual_page_count} pages, took {save_time:.2f}s)")
-    
-    _cleanup_after_merge(temp_dir, files_merged, len(files_to_merge), actual_page_count, merge_start)
-    
-    return final_output_path, actual_page_count
-
-
-def _merge_pdfs_batch(files_to_merge: List[Dict], final_output_path: str, temp_dir: str, batch_size: int, merge_start: float) -> tuple[str, int]:
-    """
-    Memory-efficient batch merging for large PDF collections.
-    Processes files in batches, saving intermediate results to disk.
+    Memory-Safe Merge (Fixed): Merges PDFs using an incremental disk-based approach.
+    Now correctly passes the filename to the save() method to prevent batch errors.
     """
     import gc
     
-    # Create temporary directory for intermediate files
-    intermediate_dir = os.path.join(temp_dir, "merge_intermediate")
+    merge_start = time.time()
+    logger.info(f"          Starting Memory-Safe PDF merge...")
+    logger.info(f"          Files to merge: {len(files_to_merge)}")
+    
+    # 1. Clean up old PDFs to ensure disk space
+    cleanup_old_pdfs(max_files=10)
+    
+    # 2. Setup paths
+    clean_proj = re.sub(r'[^a-zA-Z0-9]', '_', project_name)
+    final_filename = f"{clean_proj}_Merged.pdf"
+    final_output_path = os.path.join("output", final_filename)
+    
+    # 3. Create intermediate batches
+    BATCH_SIZE = 50
+    intermediate_dir = os.path.join(temp_dir, "batches")
     os.makedirs(intermediate_dir, exist_ok=True)
     
-    toc = []
-    current_discipline = None
-    total_pages = 0
-    files_merged = 0
     batch_files = []
+    toc = []
+    total_pages = 0
+    current_discipline = None
     
-    # Process files in batches
-    num_batches = (len(files_to_merge) + batch_size - 1) // batch_size
+    # --- PHASE A: CREATE BATCHES (In-Memory -> Temp File) ---
+    # We build the TOC here assuming all batches will merge successfully
+    num_batches = (len(files_to_merge) + BATCH_SIZE - 1) // BATCH_SIZE
     
-    for batch_num in range(num_batches):
-        batch_start_idx = batch_num * batch_size
-        batch_end_idx = min(batch_start_idx + batch_size, len(files_to_merge))
-        batch_items = files_to_merge[batch_start_idx:batch_end_idx]
+    for i in range(0, len(files_to_merge), BATCH_SIZE):
+        batch_num = (i // BATCH_SIZE) + 1
+        batch_items = files_to_merge[i : i + BATCH_SIZE]
         
-        logger.info(f"         Processing batch {batch_num + 1}/{num_batches} (files {batch_start_idx + 1}-{batch_end_idx})...")
+        logger.info(f"          Processing Batch {batch_num}/{num_batches}...")
         
-        # Create a new document for this batch
-        batch_doc = pymupdf.open()
-        batch_toc = []
-        batch_current_discipline = current_discipline
-        batch_pages = 0
-        
-        for idx, item in enumerate(batch_items, start=batch_start_idx + 1):
-            try:
-                logger.debug(f"         [{idx}/{len(files_to_merge)}] Merging: {item.get('title', 'Unknown')}")
-                file_start = time.time()
-                doc_single = pymupdf.open(item['path'])
-                page_count = len(doc_single)
-                
-                # Add discipline header to TOC (tracking offset from previous batches)
-                if item['discipline'] != batch_current_discipline:
-                    batch_toc.append([1, item['discipline'], len(batch_doc) + total_pages + 1])
-                    batch_current_discipline = item['discipline']
-                    current_discipline = batch_current_discipline
-                    logger.debug(f"           Discipline section: {item['discipline']}")
-                
-                # Add drawing to TOC
-                batch_toc.append([2, item['title'], len(batch_doc) + total_pages + 1])
-                
-                # Insert pages
-                batch_doc.insert_pdf(doc_single)
-                batch_pages += page_count
-                files_merged += 1
-                doc_single.close()
-                
-                file_time = time.time() - file_start
-                logger.debug(f"           ✓ Added {page_count} page(s) (took {file_time:.2f}s)")
-            except Exception as e:
-                logger.warning(f"         [{idx}/{len(files_to_merge)}] ✗ Could not merge {item.get('path', 'Unknown')}: {type(e).__name__}: {str(e)}")
-                continue
-        
-        # Save this batch to a temporary file
-        batch_filename = os.path.join(intermediate_dir, f"batch_{batch_num + 1}.pdf")
-        logger.debug(f"         Saving batch {batch_num + 1} to intermediate file...")
-        batch_doc.save(batch_filename, garbage=4, deflate=True)
-        batch_doc.close()
-        
-        # Add batch TOC entries to main TOC
-        toc.extend(batch_toc)
-        total_pages += batch_pages
-        batch_files.append(batch_filename)
-        
-        # Force garbage collection to free memory
-        gc.collect()
-        logger.info(f"         ✓ Batch {batch_num + 1} complete: {batch_pages} pages (total so far: {total_pages})")
-    
-    # Now merge all batch files into final document
-    logger.info(f"         Merging {len(batch_files)} batch files into final document...")
-    final_doc = pymupdf.open()
-    
-    for batch_idx, batch_file in enumerate(batch_files):
-        try:
-            logger.debug(f"         Merging batch file {batch_idx + 1}/{len(batch_files)}...")
-            batch_doc = pymupdf.open(batch_file)
-            final_doc.insert_pdf(batch_doc)
-            batch_doc.close()
+        # Create a new document for just this batch
+        with pymupdf.open() as batch_doc:
+            for item in batch_items:
+                try:
+                    with pymupdf.open(item['path']) as src_doc:
+                        batch_doc.insert_pdf(src_doc)
+                        
+                        # Build TOC entries
+                        # Note: We track page numbers globally (total_pages + current batch offset)
+                        current_page_num = total_pages + len(batch_doc) - len(src_doc) + 1
+                        
+            if item['discipline'] != current_discipline:
+                            toc.append([1, item['discipline'], current_page_num])
+                current_discipline = item['discipline']
             
-            # Clean up intermediate file immediately
-            try:
-                os.remove(batch_file)
-            except:
-                pass
+                        toc.append([2, item['title'], current_page_num])
             
-            # Force garbage collection
-            gc.collect()
         except Exception as e:
-            logger.warning(f"         ✗ Could not merge batch file {batch_file}: {type(e).__name__}: {str(e)}")
-            continue
+                    logger.warning(f"          ⚠ Skipping corrupt file {item.get('title')}: {e}")
+
+            # Save this batch to disk
+            batch_path = os.path.join(intermediate_dir, f"batch_{batch_num}.pdf")
+            batch_doc.save(batch_path, garbage=4, deflate=True)
+            batch_files.append(batch_path)
+            
+            # Update global page counter
+            total_pages += len(batch_doc)
+            
+        gc.collect()
+
+    if not batch_files:
+        raise Exception("No valid batches were created.")
+
+    # --- PHASE B: INCREMENTAL MERGE (Disk -> Disk) ---
+    logger.info(f"          Assembling final PDF from {len(batch_files)} batches...")
     
-    # Set final TOC
-    logger.info(f"         Setting table of contents ({len(toc)} entries)...")
-    final_doc.set_toc(toc)
+    # 1. Start by copying the first batch to the final destination
+    shutil.copy(batch_files[0], final_output_path)
     
-    # Save final document
-    logger.info(f"         Saving final merged PDF...")
-    save_start = time.time()
-    final_doc.save(final_output_path, garbage=4, deflate=True)
-    save_time = time.time() - save_start
+    # 2. Append subsequent batches
+    if len(batch_files) > 1:
+        for batch_path in batch_files[1:]:
+            try:
+                # Open final doc
+                doc_final = pymupdf.open(final_output_path)
+                # Open batch doc
+                doc_batch = pymupdf.open(batch_path)
+                
+                # Insert
+                doc_final.insert_pdf(doc_batch)
+                
+                # FIX: Explicitly pass the filename to save()
+                # incremental=True makes it just append data rather than rewrite
+                doc_final.save(
+                    final_output_path, 
+                    incremental=True, 
+                    encryption=pymupdf.PDF_ENCRYPT_KEEP
+                )
+                
+                doc_final.close()
+                doc_batch.close()
+                
+                # Clean up immediately
+                os.remove(batch_path)
+                gc.collect()
+                
+            except Exception as e:
+                logger.error(f"          ✗ Error merging batch {batch_path}: {e}")
+                # We stop here to prevent a corrupt TOC later
+                raise Exception(f"Merge failed at {os.path.basename(batch_path)}: {e}")
+
+    # --- PHASE C: FINALIZE (TOC & CLEANUP) ---
+    logger.info(f"          Finalizing TOC and compressing...")
     
-    # Verify the saved PDF page count
-    actual_page_count = len(final_doc)
-    final_doc.close()
-    
-    # Double-check by reopening the saved file
-    verify_doc = pymupdf.open(final_output_path)
-    verified_page_count = len(verify_doc)
-    verify_doc.close()
-    
-    if verified_page_count != actual_page_count:
-        logger.warning(f"         ⚠ Page count mismatch: Document shows {actual_page_count} but saved file has {verified_page_count}")
-        actual_page_count = verified_page_count
-    
-    # Clean up any remaining intermediate files
     try:
-        shutil.rmtree(intermediate_dir)
+        doc_final = pymupdf.open(final_output_path)
+        
+        # Verify page count matches TOC expectations
+        # If pages are missing, the TOC will throw errors, so we trim the TOC if needed
+        final_page_count = len(doc_final)
+        valid_toc = [entry for entry in toc if entry[2] <= final_page_count]
+        
+        if len(valid_toc) < len(toc):
+            logger.warning(f"          ⚠ Trimmed {len(toc) - len(valid_toc)} TOC entries due to missing pages.")
+            
+        doc_final.set_toc(valid_toc)
+        
+        # Clean save (reconstruct file to remove incremental fragmentation)
+        temp_final = final_output_path + ".tmp"
+        doc_final.save(temp_final, garbage=4, deflate=True)
+        doc_final.close()
+        
+        os.replace(temp_final, final_output_path)
+        
+    except Exception as e:
+        logger.warning(f"          ⚠ Final optimization warning: {e}")
+
+    # Final Verification
+    doc_verify = pymupdf.open(final_output_path)
+    actual_page_count = len(doc_verify)
+    doc_verify.close()
+    
+    # Cleanup temp dir
+    try:
+        shutil.rmtree(temp_dir)
     except:
         pass
     
-    final_size = os.path.getsize(final_output_path) / (1024 * 1024)  # MB
-    logger.info(f"         ✓ Saved ({final_size:.2f} MB, {actual_page_count} pages, took {save_time:.2f}s)")
+    total_time = time.time() - merge_start
+    final_size_mb = os.path.getsize(final_output_path) / (1024 * 1024)
     
-    _cleanup_after_merge(temp_dir, files_merged, len(files_to_merge), actual_page_count, merge_start)
+    logger.info(f"          ✓ MERGE COMPLETE: {actual_page_count} pages, {final_size_mb:.2f} MB")
+    logger.info(f"          Total processing time: {total_time:.2f}s")
     
     return final_output_path, actual_page_count
-
 
 def _cleanup_after_merge(temp_dir: str, files_merged: int, total_files: int, page_count: int, merge_start: float):
     """Helper function to clean up after merge and log summary."""
