@@ -2700,19 +2700,176 @@ def cleanup_old_pdfs(max_files: int = 20):
     
 #     return final_output_path, actual_page_count
 
+# def merge_pdfs(files_to_merge: List[Dict], project_name: str, temp_dir: str) -> tuple[str, int]:
+#     """
+#     Memory-Safe Merge (Fixed): Merges PDFs using an incremental disk-based approach.
+#     Now correctly passes the filename to the save() method to prevent batch errors.
+#     """
+#     import gc
+    
+#     merge_start = time.time()
+#     logger.info(f"          Starting Memory-Safe PDF merge...")
+#     logger.info(f"          Files to merge: {len(files_to_merge)}")
+    
+#     # 1. Clean up old PDFs to ensure disk space
+#     cleanup_old_pdfs(max_files=10)
+    
+#     # 2. Setup paths
+#     clean_proj = re.sub(r'[^a-zA-Z0-9]', '_', project_name)
+#     final_filename = f"{clean_proj}_Merged.pdf"
+#     final_output_path = os.path.join("output", final_filename)
+    
+#     # 3. Create intermediate batches
+#     BATCH_SIZE = 50
+#     intermediate_dir = os.path.join(temp_dir, "batches")
+#     os.makedirs(intermediate_dir, exist_ok=True)
+    
+#     batch_files = []
+#     toc = []
+#     total_pages = 0
+#     current_discipline = None
+    
+#     # --- PHASE A: CREATE BATCHES (In-Memory -> Temp File) ---
+#     # We build the TOC here assuming all batches will merge successfully
+#     num_batches = (len(files_to_merge) + BATCH_SIZE - 1) // BATCH_SIZE
+    
+#     for i in range(0, len(files_to_merge), BATCH_SIZE):
+#         batch_num = (i // BATCH_SIZE) + 1
+#         batch_items = files_to_merge[i : i + BATCH_SIZE]
+        
+#         logger.info(f"          Processing Batch {batch_num}/{num_batches}...")
+        
+#         # Create a new document for just this batch
+#         with pymupdf.open() as batch_doc:
+#             for item in batch_items:
+#                 try:
+#                     with pymupdf.open(item['path']) as src_doc:
+#                         batch_doc.insert_pdf(src_doc)
+                        
+#                         # Build TOC entries
+#                         # Note: We track page numbers globally (total_pages + current batch offset)
+#                         current_page_num = total_pages + len(batch_doc) - len(src_doc) + 1
+                        
+#                         if item['discipline'] != current_discipline:
+#                             toc.append([1, item['discipline'], current_page_num])
+#                             current_discipline = item['discipline']
+                        
+#                         toc.append([2, item['title'], current_page_num])
+                        
+#                 except Exception as e:
+#                     logger.warning(f"          ⚠ Skipping corrupt file {item.get('title')}: {e}")
+
+#             # Save this batch to disk
+#             batch_path = os.path.join(intermediate_dir, f"batch_{batch_num}.pdf")
+#             batch_doc.save(batch_path, garbage=4, deflate=True)
+#             batch_files.append(batch_path)
+            
+#             # Update global page counter
+#             total_pages += len(batch_doc)
+            
+#         gc.collect()
+
+#     if not batch_files:
+#         raise Exception("No valid batches were created.")
+
+#     # --- PHASE B: INCREMENTAL MERGE (Disk -> Disk) ---
+#     logger.info(f"          Assembling final PDF from {len(batch_files)} batches...")
+    
+#     # 1. Start by copying the first batch to the final destination
+#     shutil.copy(batch_files[0], final_output_path)
+    
+#     # 2. Append subsequent batches
+#     if len(batch_files) > 1:
+#         for batch_path in batch_files[1:]:
+#             try:
+#                 # Open final doc
+#                 doc_final = pymupdf.open(final_output_path)
+#                 # Open batch doc
+#                 doc_batch = pymupdf.open(batch_path)
+                
+#                 # Insert
+#                 doc_final.insert_pdf(doc_batch)
+                
+#                 # FIX: Explicitly pass the filename to save()
+#                 # incremental=True makes it just append data rather than rewrite
+#                 doc_final.save(
+#                     final_output_path, 
+#                     incremental=True, 
+#                     encryption=pymupdf.PDF_ENCRYPT_KEEP
+#                 )
+                
+#                 doc_final.close()
+#                 doc_batch.close()
+                
+#                 # Clean up immediately
+#                 os.remove(batch_path)
+#                 gc.collect()
+                
+#             except Exception as e:
+#                 logger.error(f"          ✗ Error merging batch {batch_path}: {e}")
+#                 # We stop here to prevent a corrupt TOC later
+#                 raise Exception(f"Merge failed at {os.path.basename(batch_path)}: {e}")
+
+#     # --- PHASE C: FINALIZE (TOC & CLEANUP) ---
+#     logger.info(f"          Finalizing TOC and compressing...")
+    
+#     try:
+#         doc_final = pymupdf.open(final_output_path)
+        
+#         # Verify page count matches TOC expectations
+#         # If pages are missing, the TOC will throw errors, so we trim the TOC if needed
+#         final_page_count = len(doc_final)
+#         valid_toc = [entry for entry in toc if entry[2] <= final_page_count]
+        
+#         if len(valid_toc) < len(toc):
+#             logger.warning(f"          ⚠ Trimmed {len(toc) - len(valid_toc)} TOC entries due to missing pages.")
+            
+#         doc_final.set_toc(valid_toc)
+        
+#         # Clean save (reconstruct file to remove incremental fragmentation)
+#         temp_final = final_output_path + ".tmp"
+#         doc_final.save(temp_final, garbage=4, deflate=True)
+#         doc_final.close()
+        
+#         os.replace(temp_final, final_output_path)
+        
+#     except Exception as e:
+#         logger.warning(f"          ⚠ Final optimization warning: {e}")
+
+#     # Final Verification
+#     doc_verify = pymupdf.open(final_output_path)
+#     actual_page_count = len(doc_verify)
+#     doc_verify.close()
+    
+#     # Cleanup temp dir
+#     try:
+#         shutil.rmtree(temp_dir)
+#     except:
+#         pass
+    
+#     total_time = time.time() - merge_start
+#     final_size_mb = os.path.getsize(final_output_path) / (1024 * 1024)
+    
+#     logger.info(f"          ✓ MERGE COMPLETE: {actual_page_count} pages, {final_size_mb:.2f} MB")
+#     logger.info(f"          Total processing time: {total_time:.2f}s")
+    
+#     return final_output_path, actual_page_count
+
 def merge_pdfs(files_to_merge: List[Dict], project_name: str, temp_dir: str) -> tuple[str, int]:
     """
-    Memory-Safe Merge (Fixed): Merges PDFs using an incremental disk-based approach.
-    Now correctly passes the filename to the save() method to prevent batch errors.
+    Memory-Safe Merge (Low RAM Mode): Optimized for Render.com Free Tier (512MB).
+    Changes:
+    1. BATCH_SIZE reduced to 10 (was 50) to prevent OOM kills.
+    2. Intermediate compression disabled to save RAM.
     """
     import gc
     
     merge_start = time.time()
-    logger.info(f"          Starting Memory-Safe PDF merge...")
+    logger.info(f"          Starting Low-RAM PDF merge...")
     logger.info(f"          Files to merge: {len(files_to_merge)}")
     
     # 1. Clean up old PDFs to ensure disk space
-    cleanup_old_pdfs(max_files=10)
+    cleanup_old_pdfs(max_files=5) # Keep fewer files to save disk space
     
     # 2. Setup paths
     clean_proj = re.sub(r'[^a-zA-Z0-9]', '_', project_name)
@@ -2720,7 +2877,8 @@ def merge_pdfs(files_to_merge: List[Dict], project_name: str, temp_dir: str) -> 
     final_output_path = os.path.join("output", final_filename)
     
     # 3. Create intermediate batches
-    BATCH_SIZE = 50
+    # CRITICAL: Reduced to 10 to fit in 512MB RAM
+    BATCH_SIZE = 10 
     intermediate_dir = os.path.join(temp_dir, "batches")
     os.makedirs(intermediate_dir, exist_ok=True)
     
@@ -2730,14 +2888,13 @@ def merge_pdfs(files_to_merge: List[Dict], project_name: str, temp_dir: str) -> 
     current_discipline = None
     
     # --- PHASE A: CREATE BATCHES (In-Memory -> Temp File) ---
-    # We build the TOC here assuming all batches will merge successfully
     num_batches = (len(files_to_merge) + BATCH_SIZE - 1) // BATCH_SIZE
     
     for i in range(0, len(files_to_merge), BATCH_SIZE):
         batch_num = (i // BATCH_SIZE) + 1
         batch_items = files_to_merge[i : i + BATCH_SIZE]
         
-        logger.info(f"          Processing Batch {batch_num}/{num_batches}...")
+        logger.info(f"          Processing Batch {batch_num}/{num_batches} (Size: {len(batch_items)})...")
         
         # Create a new document for just this batch
         with pymupdf.open() as batch_doc:
@@ -2747,7 +2904,6 @@ def merge_pdfs(files_to_merge: List[Dict], project_name: str, temp_dir: str) -> 
                         batch_doc.insert_pdf(src_doc)
                         
                         # Build TOC entries
-                        # Note: We track page numbers globally (total_pages + current batch offset)
                         current_page_num = total_pages + len(batch_doc) - len(src_doc) + 1
                         
                         if item['discipline'] != current_discipline:
@@ -2761,12 +2917,16 @@ def merge_pdfs(files_to_merge: List[Dict], project_name: str, temp_dir: str) -> 
 
             # Save this batch to disk
             batch_path = os.path.join(intermediate_dir, f"batch_{batch_num}.pdf")
-            batch_doc.save(batch_path, garbage=4, deflate=True)
+            
+            # CRITICAL: deflate=False saves RAM/CPU during batch creation
+            # We don't need compressed batches, only the final file needs compression.
+            batch_doc.save(batch_path, garbage=0, deflate=False)
             batch_files.append(batch_path)
             
             # Update global page counter
             total_pages += len(batch_doc)
             
+        # Force memory release immediately
         gc.collect()
 
     if not batch_files:
@@ -2775,12 +2935,12 @@ def merge_pdfs(files_to_merge: List[Dict], project_name: str, temp_dir: str) -> 
     # --- PHASE B: INCREMENTAL MERGE (Disk -> Disk) ---
     logger.info(f"          Assembling final PDF from {len(batch_files)} batches...")
     
-    # 1. Start by copying the first batch to the final destination
+    # 1. Start by copying the first batch
     shutil.copy(batch_files[0], final_output_path)
     
     # 2. Append subsequent batches
     if len(batch_files) > 1:
-        for batch_path in batch_files[1:]:
+        for idx, batch_path in enumerate(batch_files[1:], start=2):
             try:
                 # Open final doc
                 doc_final = pymupdf.open(final_output_path)
@@ -2790,8 +2950,7 @@ def merge_pdfs(files_to_merge: List[Dict], project_name: str, temp_dir: str) -> 
                 # Insert
                 doc_final.insert_pdf(doc_batch)
                 
-                # FIX: Explicitly pass the filename to save()
-                # incremental=True makes it just append data rather than rewrite
+                # Save incrementally
                 doc_final.save(
                     final_output_path, 
                     incremental=True, 
@@ -2801,40 +2960,53 @@ def merge_pdfs(files_to_merge: List[Dict], project_name: str, temp_dir: str) -> 
                 doc_final.close()
                 doc_batch.close()
                 
-                # Clean up immediately
+                # Clean up batch file immediately to free disk space
                 os.remove(batch_path)
-                gc.collect()
+                
+                # Log progress periodically
+                if idx % 5 == 0:
+                    logger.info(f"          ... Merged batch {idx}/{len(batch_files)}")
+                    gc.collect()
                 
             except Exception as e:
                 logger.error(f"          ✗ Error merging batch {batch_path}: {e}")
-                # We stop here to prevent a corrupt TOC later
                 raise Exception(f"Merge failed at {os.path.basename(batch_path)}: {e}")
 
-    # --- PHASE C: FINALIZE (TOC & CLEANUP) ---
-    logger.info(f"          Finalizing TOC and compressing...")
+    # Remove the first batch file (it was copied, not removed in loop)
+    if os.path.exists(batch_files[0]):
+        os.remove(batch_files[0])
+
+    # --- PHASE C: FINALIZE (TOC & COMPRESS) ---
+    logger.info(f"          Finalizing TOC and Compressing (High RAM Step)...")
     
     try:
+        # Re-open for final polish
         doc_final = pymupdf.open(final_output_path)
         
-        # Verify page count matches TOC expectations
-        # If pages are missing, the TOC will throw errors, so we trim the TOC if needed
+        # Validate TOC
         final_page_count = len(doc_final)
         valid_toc = [entry for entry in toc if entry[2] <= final_page_count]
         
         if len(valid_toc) < len(toc):
-            logger.warning(f"          ⚠ Trimmed {len(toc) - len(valid_toc)} TOC entries due to missing pages.")
+            logger.warning(f"          ⚠ Trimmed {len(toc) - len(valid_toc)} TOC entries.")
             
         doc_final.set_toc(valid_toc)
         
-        # Clean save (reconstruct file to remove incremental fragmentation)
+        # Clean save with Compression (Deflate)
+        # This is the only step that uses high RAM, but we cleared everything else
         temp_final = final_output_path + ".tmp"
-        doc_final.save(temp_final, garbage=4, deflate=True)
+        doc_final.save(
+            temp_final, 
+            garbage=4, 
+            deflate=True, # Compress ONLY at the very end
+            deflate_images=False # Skip image re-compression to save RAM/Time
+        )
         doc_final.close()
         
         os.replace(temp_final, final_output_path)
         
     except Exception as e:
-        logger.warning(f"          ⚠ Final optimization warning: {e}")
+        logger.warning(f"          ⚠ Optimization warning: {e}")
 
     # Final Verification
     doc_verify = pymupdf.open(final_output_path)
@@ -2846,7 +3018,7 @@ def merge_pdfs(files_to_merge: List[Dict], project_name: str, temp_dir: str) -> 
         shutil.rmtree(temp_dir)
     except:
         pass
-    
+
     total_time = time.time() - merge_start
     final_size_mb = os.path.getsize(final_output_path) / (1024 * 1024)
     
