@@ -1,5 +1,6 @@
 import os
 import re
+import gc
 import time
 import json
 import shutil
@@ -371,16 +372,19 @@ class ProcoreDocManager:
 
     def upload_file_sync(self, local_file_path: str, target_folder_id: int) -> str:
         """
-        Synchronous fallback upload using requests library.
-        Used when async upload fails due to SSL or connection issues.
+        Synchronous streaming upload using requests library.
+        Uses a file generator to avoid loading entire file into memory.
+        Critical for low-RAM environments like Render.com.
         """
+        from requests_toolbelt import MultipartEncoder, MultipartEncoderMonitor
+        
         endpoint = f"{self.base_url}/rest/v1.0/files"
         params = {"project_id": self.project_id}
         file_name = os.path.basename(local_file_path)
 
         # Get file size for logging
         file_size_mb = os.path.getsize(local_file_path) / (1024 * 1024)
-        logger.info(f"         🔄 Synchronous upload attempt: {file_name} ({file_size_mb:.2f} MB)")
+        logger.info(f"         🔄 Streaming upload: {file_name} ({file_size_mb:.2f} MB)")
         
         # Calculate timeout (same as async: 10 sec/MB, min 5min, max 30min)
         upload_timeout = min(max(300, int(file_size_mb * 10)), 1800)
@@ -389,47 +393,52 @@ class ProcoreDocManager:
         max_retries = 3
         for attempt in range(1, max_retries + 1):
             try:
-                logger.info(f"         Sync upload attempt {attempt}/{max_retries}...")
+                logger.info(f"         Streaming upload attempt {attempt}/{max_retries}...")
                 upload_start = time.time()
                 
-                # Prepare multipart form data
+                # Use streaming multipart encoder to avoid loading file into memory
+                # The file is read in chunks as it's being uploaded
                 with open(local_file_path, 'rb') as f:
-                    files = {
-                        'file[data]': (file_name, f, 'application/pdf')
-                    }
-                    data = {
-                        'file[parent_id]': str(target_folder_id),
-                        'file[name]': file_name
-                    }
+                    encoder = MultipartEncoder(
+                        fields={
+                            'file[parent_id]': str(target_folder_id),
+                            'file[name]': file_name,
+                            'file[data]': (file_name, f, 'application/pdf')
+                        }
+                    )
                     
-                    # Make synchronous POST request
+                    # Create headers with content type from encoder
+                    upload_headers = self.headers.copy()
+                    upload_headers['Content-Type'] = encoder.content_type
+                    
+                    # Make streaming POST request
                     response = requests.post(
                         endpoint,
-                        headers=self.headers,
+                        headers=upload_headers,
                         params=params,
-                        files=files,
-                        data=data,
+                        data=encoder,  # Streams the file in chunks
                         timeout=upload_timeout,
-                        verify=True  # Use system SSL certificates
+                        verify=True
                     )
                 
                 if response.status_code in [200, 201]:
                     upload_time = time.time() - upload_start
-                    logger.info(f"         ✓ Sync upload successful: '{file_name}' (took {upload_time:.2f}s, {file_size_mb/upload_time:.2f} MB/s)")
+                    speed = file_size_mb / upload_time if upload_time > 0 else 0
+                    logger.info(f"         ✓ Streaming upload successful: '{file_name}' (took {upload_time:.2f}s, {speed:.2f} MB/s)")
                     return "Success"
                 else:
                     error_msg = f"Error {response.status_code}: {response.text[:200]}"
-                    logger.warning(f"         ⚠ Sync upload attempt {attempt} failed: {error_msg}")
+                    logger.warning(f"         ⚠ Streaming upload attempt {attempt} failed: {error_msg}")
                     
                     if attempt < max_retries:
-                        time.sleep(5)  # Wait 5 seconds before retry
+                        time.sleep(5)
                         continue
                     else:
-                        logger.error(f"         ✗ Sync upload failed after {max_retries} attempts: {error_msg}")
+                        logger.error(f"         ✗ Streaming upload failed after {max_retries} attempts: {error_msg}")
                         return error_msg
                         
             except requests.exceptions.Timeout as e:
-                error_msg = f"Sync upload timeout after {upload_timeout}s"
+                error_msg = f"Streaming upload timeout after {upload_timeout}s"
                 logger.warning(f"         ⚠ {error_msg} (attempt {attempt}/{max_retries})")
                 if attempt < max_retries:
                     time.sleep(5)
@@ -438,8 +447,13 @@ class ProcoreDocManager:
                     logger.error(f"         ✗ {error_msg}")
                     return error_msg
                     
+            except ImportError:
+                # Fallback if requests_toolbelt is not installed
+                logger.warning(f"         ⚠ requests_toolbelt not available, using standard upload")
+                return self._upload_file_sync_fallback(local_file_path, target_folder_id)
+                    
             except Exception as e:
-                error_msg = f"Sync upload error: {type(e).__name__}: {str(e)}"
+                error_msg = f"Streaming upload error: {type(e).__name__}: {str(e)}"
                 logger.warning(f"         ⚠ {error_msg} (attempt {attempt}/{max_retries})")
                 if attempt < max_retries:
                     time.sleep(5)
@@ -448,7 +462,39 @@ class ProcoreDocManager:
                     logger.error(f"         ✗ {error_msg}")
                     return error_msg
         
-        return "Sync upload failed after all retries"
+        return "Streaming upload failed after all retries"
+    
+    def _upload_file_sync_fallback(self, local_file_path: str, target_folder_id: int) -> str:
+        """
+        Fallback upload if requests_toolbelt is not available.
+        Less memory-efficient but still functional.
+        """
+        endpoint = f"{self.base_url}/rest/v1.0/files"
+        params = {"project_id": self.project_id}
+        file_name = os.path.basename(local_file_path)
+        file_size_mb = os.path.getsize(local_file_path) / (1024 * 1024)
+        upload_timeout = min(max(300, int(file_size_mb * 10)), 1800)
+        
+        try:
+            with open(local_file_path, 'rb') as f:
+                files = {'file[data]': (file_name, f, 'application/pdf')}
+                data = {'file[parent_id]': str(target_folder_id), 'file[name]': file_name}
+                
+                response = requests.post(
+                    endpoint,
+                    headers=self.headers,
+                    params=params,
+                    files=files,
+                    data=data,
+                    timeout=upload_timeout,
+                    verify=True
+                )
+            
+            if response.status_code in [200, 201]:
+                return "Success"
+            return f"Error {response.status_code}: {response.text[:200]}"
+        except Exception as e:
+            return f"Fallback upload error: {type(e).__name__}: {str(e)}"
 
     # @retry(
     #     stop=stop_after_attempt(5),  # Try up to 5 times
@@ -667,14 +713,15 @@ class ProcoreDocManager:
     async def upload_file(self, local_file_path: str, target_folder_id: int) -> str:
         """
         Smart Upload: 
-        - Uses Standard Upload for files < 60MB
-        - Uses Segmented (S3) Upload for files >= 60MB (Prevents timeouts)
+        - Uses Standard Upload for files < 30MB (reduced for low-memory environments)
+        - Uses Segmented (S3) Upload for files >= 30MB (Prevents timeouts and memory spikes)
         """
         file_name = os.path.basename(local_file_path)
         file_size_mb = os.path.getsize(local_file_path) / (1024 * 1024)
         
-        # 60MB is a safe threshold for standard API timeouts
-        if file_size_mb >= 60:
+        # 30MB threshold (reduced from 60MB) - segmented upload is more memory-efficient
+        # This helps prevent OOM on low-RAM environments like Render.com
+        if file_size_mb >= 30:
             logger.info(f"          📦 Large file ({file_size_mb:.2f} MB). Switching to Segmented S3 Upload.")
             return await self.upload_large_file_segmented(local_file_path, target_folder_id)
         
@@ -2458,6 +2505,10 @@ async def run_job_async(
             
             logger.info(f"         └─ Batch {batch_num} complete: {successful} succeeded, {failed} failed (took {download_time:.2f}s)")
             
+            # Force garbage collection to free memory (critical for low-RAM environments)
+            if settings.LOW_MEMORY_MODE:
+                gc.collect()
+            
             # Small delay between batches
             if batch_end < total_files:
                 logger.debug(f"         Waiting 0.5s before next batch...")
@@ -3138,12 +3189,10 @@ def merge_pdfs(files_to_merge: List[Dict], project_name: str, temp_dir: str) -> 
     """
     Standard Tier Merge: Optimized for 2GB RAM.
     - Uses Batching for safety.
-    - DISBLES final compression to prevent memory crashes.
+    - DISABLES final compression to prevent memory crashes.
     """
-    import gc
-    
     merge_start = time.time()
-    logger.info(f"          Starting PDF merge (Standard Tier)...")
+    logger.info(f"          Starting PDF merge (Low Memory Mode: {settings.LOW_MEMORY_MODE})...")
     logger.info(f"          Files to merge: {len(files_to_merge)}")
     
     # 1. Clean up old PDFs
@@ -3154,9 +3203,9 @@ def merge_pdfs(files_to_merge: List[Dict], project_name: str, temp_dir: str) -> 
     final_filename = f"{clean_proj}_Merged.pdf"
     final_output_path = os.path.join("output", final_filename)
     
-    # 3. Setup Batches
-    # We can handle larger batches now with 2GB RAM
-    BATCH_SIZE = 50 
+    # 3. Setup Batches - use configurable batch size (default 15 for low memory)
+    BATCH_SIZE = settings.MERGE_BATCH_SIZE
+    logger.info(f"          Merge batch size: {BATCH_SIZE}")
     intermediate_dir = os.path.join(temp_dir, "batches")
     os.makedirs(intermediate_dir, exist_ok=True)
     
@@ -3174,6 +3223,9 @@ def merge_pdfs(files_to_merge: List[Dict], project_name: str, temp_dir: str) -> 
         
         logger.info(f"          Processing Batch {batch_num}/{num_batches}...")
         
+        # Track source files to delete after batch is created
+        source_files_to_delete = []
+        
         with pymupdf.open() as batch_doc:
             for item in batch_items:
                 try:
@@ -3187,6 +3239,10 @@ def merge_pdfs(files_to_merge: List[Dict], project_name: str, temp_dir: str) -> 
                             current_discipline = item['discipline']
                         toc.append([2, item['title'], current_page_num])
                         
+                    # Mark source file for deletion (progressive cleanup)
+                    if settings.LOW_MEMORY_MODE:
+                        source_files_to_delete.append(item['path'])
+                        
                 except Exception as e:
                     logger.warning(f"          ⚠ Skipping corrupt file {item.get('title')}: {e}")
 
@@ -3195,6 +3251,20 @@ def merge_pdfs(files_to_merge: List[Dict], project_name: str, temp_dir: str) -> 
             batch_doc.save(batch_path, garbage=0, deflate=False)
             batch_files.append(batch_path)
             total_pages += len(batch_doc)
+        
+        # Progressive cleanup: delete source PDFs after batch is saved
+        # This frees disk space and reduces memory pressure
+        if settings.LOW_MEMORY_MODE and source_files_to_delete:
+            deleted_count = 0
+            for src_path in source_files_to_delete:
+                try:
+                    if os.path.exists(src_path):
+                        os.remove(src_path)
+                        deleted_count += 1
+                except Exception:
+                    pass  # Ignore cleanup errors
+            if deleted_count > 0:
+                logger.debug(f"          Cleaned up {deleted_count} source PDFs from batch {batch_num}")
             
         gc.collect()
 
