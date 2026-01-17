@@ -614,55 +614,79 @@ class ProcoreDocManager:
                 raise
             return f"Upload Error: {str(e)}"
 
+    # async def upload_file(self, local_file_path: str, target_folder_id: int) -> str:
+    #     """
+    #     Upload a file to Procore.
+    #     Tries async upload first, falls back to synchronous upload if async fails.
+    #     """
+    #     file_name = os.path.basename(local_file_path)
+    #     file_size_mb = os.path.getsize(local_file_path) / (1024 * 1024)
+    #     async_start = time.time()
+        
+    #     try:
+    #         # Try async upload first (with automatic retries via @retry decorator)
+    #         result = await self._upload_file_async(local_file_path, target_folder_id)
+    #         return result
+            
+    #     except RetryError as e:
+    #         # All async retries exhausted
+    #         async_duration = time.time() - async_start
+    #         logger.warning(f"═══════════════════════════════════════════════════════════")
+    #         logger.warning(f"⚠️  ASYNC UPLOAD FAILED AFTER ALL RETRIES")
+    #         logger.warning(f"   File: {file_name} ({file_size_mb:.2f} MB)")
+    #         logger.warning(f"   Time spent on async attempts: {async_duration:.2f}s")
+            
+    #         # Log SSL diagnostics
+    #         ssl_details = extract_ssl_error_details(e)
+    #         logger.info(f"   SSL Error Details:")
+    #         for key, value in ssl_details.items():
+    #             logger.info(f"     - {key}: {value}")
+            
+    #         logger.warning(f"   Falling back to synchronous upload...")
+    #         logger.warning(f"═══════════════════════════════════════════════════════════")
+            
+    #         # Try synchronous fallback
+    #         sync_result = self.upload_file_sync(local_file_path, target_folder_id)
+            
+    #         if sync_result == "Success":
+    #             total_time = time.time() - async_start
+    #             logger.info(f"═══════════════════════════════════════════════════════════")
+    #             logger.info(f"✅ UPLOAD SUCCEEDED VIA SYNC FALLBACK")
+    #             logger.info(f"   File: {file_name}")
+    #             logger.info(f"   Total time (async attempts + sync): {total_time:.2f}s")
+    #             logger.info(f"═══════════════════════════════════════════════════════════")
+            
+    #         return sync_result
+            
+    #     except Exception as e:
+    #         # Unexpected error not caught by retry logic
+    #         error_msg = f"Unexpected upload error: {type(e).__name__}: {str(e)}"
+    #         logger.error(f"         ✗ {error_msg}")
+    #         return error_msg
+
     async def upload_file(self, local_file_path: str, target_folder_id: int) -> str:
         """
-        Upload a file to Procore.
-        Tries async upload first, falls back to synchronous upload if async fails.
+        Smart Upload: 
+        - Uses Standard Upload for files < 60MB
+        - Uses Segmented (S3) Upload for files >= 60MB (Prevents timeouts)
         """
         file_name = os.path.basename(local_file_path)
         file_size_mb = os.path.getsize(local_file_path) / (1024 * 1024)
-        async_start = time.time()
         
+        # 60MB is a safe threshold for standard API timeouts
+        if file_size_mb >= 60:
+            logger.info(f"          📦 Large file ({file_size_mb:.2f} MB). Switching to Segmented S3 Upload.")
+            return await self.upload_large_file_segmented(local_file_path, target_folder_id)
+        
+        # Standard flow for small files
         try:
-            # Try async upload first (with automatic retries via @retry decorator)
-            result = await self._upload_file_async(local_file_path, target_folder_id)
-            return result
-            
+            return await self._upload_file_async(local_file_path, target_folder_id)
         except RetryError as e:
-            # All async retries exhausted
-            async_duration = time.time() - async_start
-            logger.warning(f"═══════════════════════════════════════════════════════════")
-            logger.warning(f"⚠️  ASYNC UPLOAD FAILED AFTER ALL RETRIES")
-            logger.warning(f"   File: {file_name} ({file_size_mb:.2f} MB)")
-            logger.warning(f"   Time spent on async attempts: {async_duration:.2f}s")
-            
-            # Log SSL diagnostics
-            ssl_details = extract_ssl_error_details(e)
-            logger.info(f"   SSL Error Details:")
-            for key, value in ssl_details.items():
-                logger.info(f"     - {key}: {value}")
-            
-            logger.warning(f"   Falling back to synchronous upload...")
-            logger.warning(f"═══════════════════════════════════════════════════════════")
-            
-            # Try synchronous fallback
-            sync_result = self.upload_file_sync(local_file_path, target_folder_id)
-            
-            if sync_result == "Success":
-                total_time = time.time() - async_start
-                logger.info(f"═══════════════════════════════════════════════════════════")
-                logger.info(f"✅ UPLOAD SUCCEEDED VIA SYNC FALLBACK")
-                logger.info(f"   File: {file_name}")
-                logger.info(f"   Total time (async attempts + sync): {total_time:.2f}s")
-                logger.info(f"═══════════════════════════════════════════════════════════")
-            
-            return sync_result
-            
+            # Fallback to sync if async fails (existing logic)
+            # ... (keep your existing error handling here) ...
+            return self.upload_file_sync(local_file_path, target_folder_id)
         except Exception as e:
-            # Unexpected error not caught by retry logic
-            error_msg = f"Unexpected upload error: {type(e).__name__}: {str(e)}"
-            logger.error(f"         ✗ {error_msg}")
-            return error_msg
+            return f"Error: {str(e)}"
 
     async def process_file_update(self, file_path: str, target_folder_id: int, archive_folder_id: Optional[int]) -> str:
         """Clean up existing files and upload new one."""
@@ -752,6 +776,89 @@ class ProcoreDocManager:
         except Exception as e:
             logger.debug(f"Could not create Archive folder: {e}")
             return None
+
+    async def upload_large_file_segmented(self, local_file_path: str, target_folder_id: int) -> str:
+        """
+        Handles large file uploads (>100MB) using Procore's Segmented Upload (S3) flow.
+        """
+        file_name = os.path.basename(local_file_path)
+        file_size = os.path.getsize(local_file_path)
+        
+        logger.info(f"          🔄 Starting Segmented Upload for {file_name} ({file_size / (1024*1024):.2f} MB)...")
+
+        # STEP 1: Initialize Upload (Get UUID and S3 URL)
+        await self._ensure_session()
+        init_url = f"{self.base_url}/rest/v1.0/companies/{self.company_id}/uploads"
+        
+        payload = {
+            "name": file_name,
+            "size": file_size,
+            "mimetype": "application/pdf"
+        }
+        
+        try:
+            # Initialize
+            async with self.session.post(init_url, headers=self.headers, json=payload) as response:
+                response.raise_for_status()
+                init_data = await response.json()
+            
+            upload_uuid = init_data.get("uuid")
+            s3_url = init_data.get("url")
+            s3_fields = init_data.get("fields", {})
+            
+            if not upload_uuid or not s3_url:
+                raise Exception("Failed to get upload UUID or S3 URL from Procore")
+
+            logger.info(f"          ✓ Step 1: Init complete (UUID: {upload_uuid})")
+
+            # STEP 2: Upload to S3
+            # S3 requires specific form fields in strict order
+            logger.info(f"          ⏳ Step 2: Uploading binary to S3...")
+            
+            upload_start = time.time()
+            form = aiohttp.FormData()
+            
+            # Add AWS fields first
+            for key, value in s3_fields.items():
+                form.add_field(key, value)
+            
+            # Add file last
+            with open(local_file_path, 'rb') as f:
+                form.add_field('file', f, filename=file_name, content_type='application/pdf')
+                
+                # Use a specific long timeout for the S3 transfer (1 hour)
+                s3_timeout = aiohttp.ClientTimeout(total=3600, connect=60)
+                
+                # Direct post to S3 (no Procore headers)
+                async with aiohttp.ClientSession(timeout=s3_timeout) as s3_session:
+                    async with s3_session.post(s3_url, data=form) as s3_resp:
+                        if s3_resp.status not in [200, 201, 204]:
+                            text = await s3_resp.text()
+                            raise Exception(f"S3 Error {s3_resp.status}: {text}")
+                            
+            logger.info(f"          ✓ Step 2: S3 Upload complete (took {time.time() - upload_start:.2f}s)")
+
+            # STEP 3: Finalize in Procore
+            logger.info(f"          ⏳ Step 3: Finalizing...")
+            finalize_url = f"{self.base_url}/rest/v1.0/files"
+            
+            finalize_payload = {
+                "file": {
+                    "upload_uuid": upload_uuid,
+                    "parent_id": target_folder_id,
+                    "name": file_name
+                }
+            }
+            
+            # Use standard _make_request for finalization
+            await self._make_request('POST', finalize_url, headers=self.headers, json=finalize_payload)
+            logger.info(f"          ✓ Step 3: File created successfully")
+            
+            return "Success"
+
+        except Exception as e:
+            logger.error(f"          ✗ Segmented upload failed: {str(e)}")
+            return f"Segmented Upload Error: {str(e)}"
 
     async def close(self):
         """Close the session."""
