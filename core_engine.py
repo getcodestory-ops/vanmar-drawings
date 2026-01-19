@@ -9,6 +9,7 @@ import aiohttp
 import pymupdf
 import requests
 import ssl
+import threading
 from datetime import datetime
 from typing import List, Dict, Any, Optional, Callable
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type, RetryError
@@ -16,13 +17,95 @@ import logging
 
 from config import settings
 
+logger = logging.getLogger(__name__)
+
+# Optional import for memory tracking
+try:
+    import psutil
+    PSUTIL_AVAILABLE = True
+except ImportError:
+    PSUTIL_AVAILABLE = False
+    logger.warning("psutil not available - memory tracking will be disabled. Install with: pip install psutil")
+
 # Commented out imports - only needed for legacy markup overlay functions
 # import math
 # from collections import defaultdict
 # import statistics
 # import itertools
 
-logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------
+# MEMORY TRACKING
+# ---------------------------------------------------------
+
+def log_memory(label: str = ""):
+    """Log current memory usage."""
+    if not PSUTIL_AVAILABLE:
+        return 0.0
+    try:
+        process = psutil.Process(os.getpid())
+        mem_info = process.memory_info()
+        rss_mb = mem_info.rss / (1024 * 1024)  # Resident Set Size in MB
+        logger.info(f"          📊 RAM: {rss_mb:.1f} MB {label}")
+        return rss_mb
+    except Exception as e:
+        logger.debug(f"          Could not log memory: {e}")
+        return 0.0
+
+
+class MemoryTracker:
+    """Track peak memory usage during a job."""
+    
+    def __init__(self):
+        self.peak_mb = 0
+        self.running = False
+        self._thread = None
+    
+    def start(self):
+        """Start monitoring memory usage."""
+        if not PSUTIL_AVAILABLE:
+            return
+        self.peak_mb = 0
+        self.running = True
+        self._thread = threading.Thread(target=self._monitor, daemon=True)
+        self._thread.start()
+    
+    def _monitor(self):
+        """Background thread to continuously monitor memory."""
+        if not PSUTIL_AVAILABLE:
+            return
+        process = psutil.Process(os.getpid())
+        while self.running:
+            try:
+                current_mb = process.memory_info().rss / (1024 * 1024)
+                if current_mb > self.peak_mb:
+                    self.peak_mb = current_mb
+            except:
+                pass
+            time.sleep(0.5)  # Check every 500ms
+    
+    def stop(self) -> float:
+        """Stop monitoring and return peak memory."""
+        if not PSUTIL_AVAILABLE:
+            return 0.0
+        self.running = False
+        if self._thread:
+            self._thread.join(timeout=1)
+        return self.peak_mb
+    
+    def get_current(self) -> float:
+        """Get current memory usage."""
+        if not PSUTIL_AVAILABLE:
+            return 0.0
+        try:
+            process = psutil.Process(os.getpid())
+            return process.memory_info().rss / (1024 * 1024)
+        except:
+            return 0.0
+
+
+# Global tracker instance
+memory_tracker = MemoryTracker()
 
 
 # ---------------------------------------------------------
@@ -403,8 +486,8 @@ class ProcoreDocManager:
                         fields={
                             'file[parent_id]': str(target_folder_id),
                             'file[name]': file_name,
-                            'file[data]': (file_name, f, 'application/pdf')
-                        }
+                        'file[data]': (file_name, f, 'application/pdf')
+                    }
                     )
                     
                     # Create headers with content type from encoder
@@ -699,8 +782,8 @@ class ProcoreDocManager:
         
         payload = {
             "upload": {
-                "name": file_name,
-                "size": file_size,
+            "name": file_name,
+            "size": file_size,
                 "content_type": "application/pdf"
             }
         }
@@ -1149,11 +1232,17 @@ async def run_job_async(
 ) -> str:
     """Main async job runner with parallel downloads."""
     start_time = time.time()
+    
+    # Start memory tracking
+    memory_tracker.start()
+    initial_ram = memory_tracker.get_current()
+    
     logger.info(f"═══════════════════════════════════════════════════════════")
     logger.info(f"🚀 STARTING PDF GENERATION JOB")
     logger.info(f"   Project ID: {project_id}")
     logger.info(f"   Disciplines: {', '.join(target_disciplines)}")
     logger.info(f"   Started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    logger.info(f"   📊 Initial RAM: {initial_ram:.1f} MB")
     logger.info(f"═══════════════════════════════════════════════════════════")
     
     client = AsyncProcoreClient(access_token, settings.PROCORE_COMPANY_ID)
@@ -1384,6 +1473,9 @@ async def run_job_async(
             if settings.LOW_MEMORY_MODE:
                 gc.collect()
             
+            # Log memory after each batch
+            log_memory(f"[After Download Batch {batch_num}]")
+            
             # Small delay between batches
             if batch_end < total_files:
                 logger.debug(f"         Waiting 0.5s before next batch...")
@@ -1393,6 +1485,7 @@ async def run_job_async(
             logger.error(f"         ✗ No PDFs generated successfully out of {total_files} attempts")
             raise Exception("No PDFs generated successfully")
 
+        log_memory("[After All Downloads Complete]")
         logger.info(f"         ✓ Successfully processed {len(files_to_merge)}/{total_files} drawings (took {time.time() - step_start:.2f}s)")
 
         # STEP 7: Merging phase
@@ -1402,12 +1495,14 @@ async def run_job_async(
             progress_callback(92, total_files, total_files)  # All drawings processed
 
         # Merge PDFs (CPU-intensive, run in thread)
+        log_memory("[Before Merge]")
         final_output_path, actual_page_count = await asyncio.to_thread(
             merge_pdfs,
             files_to_merge,
             project_name,
             temp_dir
         )
+        log_memory("[After Merge Complete]")
         
         # STEP 8: Validate PDF page count
         expected_pages = len(files_to_merge)
@@ -1431,6 +1526,11 @@ async def run_job_async(
         
         merge_time = time.time() - step_start
         total_time = time.time() - start_time
+        
+        # Stop memory tracking and log peak usage
+        peak_ram = memory_tracker.stop()
+        current_ram = memory_tracker.get_current()
+        
         logger.info(f"         ✓ Merge complete: {os.path.basename(final_output_path)} (took {merge_time:.2f}s)")
         logger.info(f"═══════════════════════════════════════════════════════════")
         logger.info(f"✅ JOB COMPLETED SUCCESSFULLY")
@@ -1438,64 +1538,79 @@ async def run_job_async(
         logger.info(f"   Total time: {total_time:.2f}s ({total_time/60:.1f} minutes)")
         logger.info(f"   Processed: {len(files_to_merge)}/{total_files} drawings")
         logger.info(f"   Pages: {actual_page_count} (verified)")
+        logger.info(f"   📊 RAM Usage: Peak {peak_ram:.1f} MB / 2048 MB ({peak_ram/2048*100:.1f}%) | Final {current_ram:.1f} MB")
         logger.info(f"═══════════════════════════════════════════════════════════")
 
         return final_output_path
 
     except Exception as e:
         total_time = time.time() - start_time
+        
+        # Stop memory tracking and log peak usage even on error
+        peak_ram = memory_tracker.stop()
+        current_ram = memory_tracker.get_current()
+        
         logger.error(f"═══════════════════════════════════════════════════════════")
         logger.error(f"❌ JOB FAILED after {total_time:.2f}s")
         logger.error(f"   Error: {type(e).__name__}: {str(e)}")
         logger.error(f"   Project ID: {project_id}")
         logger.error(f"   Disciplines: {', '.join(target_disciplines)}")
+        logger.error(f"   📊 RAM at crash: {current_ram:.1f} MB | Peak: {peak_ram:.1f} MB / 2048 MB ({peak_ram/2048*100:.1f}%)")
         logger.error(f"═══════════════════════════════════════════════════════════", exc_info=True)
         raise
     finally:
         await client.close()
 
 
-def cleanup_old_pdfs(max_files: int = 20):
+def cleanup_old_pdfs_per_project():
     """
-    Clean up old PDF files in the output directory, keeping only the most recent ones.
-    
-    Args:
-        max_files: Maximum number of files to keep (default: 20)
+    Clean up old PDF files per project, keeping only the latest PDF for each project.
     """
     output_dir = "output"
     if not os.path.exists(output_dir):
         return
     
     try:
-        # Get all PDF files with their modification times
-        pdf_files = []
+        # Group PDF files by project name
+        project_pdfs = {}  # {project_name: [(filepath, mtime, filename), ...]}
+        
         for filename in os.listdir(output_dir):
             filepath = os.path.join(output_dir, filename)
             if os.path.isfile(filepath) and filename.lower().endswith('.pdf'):
-                mtime = os.path.getmtime(filepath)
-                pdf_files.append((filepath, mtime, filename))
+                # Extract project name from filename pattern: {ProjectName}_Merged.pdf
+                if '_Merged.pdf' in filename:
+                    project_name = filename.replace('_Merged.pdf', '')
+                    mtime = os.path.getmtime(filepath)
+                    
+                    if project_name not in project_pdfs:
+                        project_pdfs[project_name] = []
+                    project_pdfs[project_name].append((filepath, mtime, filename))
         
-        # Sort by modification time (newest first)
-        pdf_files.sort(key=lambda x: x[1], reverse=True)
+        # For each project, keep only the most recent PDF
+        total_deleted = 0
+        total_freed_mb = 0
         
-        # If we have more than max_files, delete the oldest ones
-        if len(pdf_files) >= max_files:
-            files_to_delete = pdf_files[max_files:]
-            deleted_count = 0
-            freed_space_mb = 0
-            
-            for filepath, _, filename in files_to_delete:
-                try:
-                    file_size = os.path.getsize(filepath) / (1024 * 1024)  # MB
-                    os.remove(filepath)
-                    deleted_count += 1
-                    freed_space_mb += file_size
-                    logger.debug(f"         Deleted old PDF: {filename} ({file_size:.2f} MB)")
-                except Exception as e:
-                    logger.warning(f"         Could not delete {filename}: {e}")
-            
-            if deleted_count > 0:
-                logger.info(f"         Cleaned up {deleted_count} old PDF file(s), freed {freed_space_mb:.2f} MB")
+        for project_name, files in project_pdfs.items():
+            if len(files) > 1:
+                # Sort by modification time (newest first)
+                files.sort(key=lambda x: x[1], reverse=True)
+                
+                # Delete all but the most recent
+                files_to_delete = files[1:]
+                
+                for filepath, _, filename in files_to_delete:
+                    try:
+                        file_size = os.path.getsize(filepath) / (1024 * 1024)
+                        os.remove(filepath)
+                        total_deleted += 1
+                        total_freed_mb += file_size
+                        logger.debug(f"         Deleted old PDF: {filename} ({file_size:.2f} MB)")
+                    except Exception as e:
+                        logger.warning(f"         Could not delete {filename}: {e}")
+        
+        if total_deleted > 0:
+            logger.info(f"         Cleaned up {total_deleted} old PDF(s), freed {total_freed_mb:.2f} MB")
+    
     except Exception as e:
         logger.warning(f"         Error during PDF cleanup: {e}")
 
@@ -1509,18 +1624,16 @@ def merge_pdfs(files_to_merge: List[Dict], project_name: str, temp_dir: str) -> 
     - DISABLES final compression to prevent memory crashes.
     """
     merge_start = time.time()
+    log_memory("[MERGE START]")
     logger.info(f"          Starting PDF merge (Low Memory Mode: {settings.LOW_MEMORY_MODE})...")
     logger.info(f"          Files to merge: {len(files_to_merge)}")
     
-    # 1. Clean up old PDFs
-    cleanup_old_pdfs(max_files=10)
-    
-    # 2. Setup paths
+    # 1. Setup paths (cleanup moved to after successful generation)
     clean_proj = re.sub(r'[^a-zA-Z0-9]', '_', project_name)
     final_filename = f"{clean_proj}_Merged.pdf"
     final_output_path = os.path.join("output", final_filename)
     
-    # 3. Setup Batches - use configurable batch size (default 15 for low memory)
+    # 2. Setup Batches - use configurable batch size (default 15 for low memory)
     BATCH_SIZE = settings.MERGE_BATCH_SIZE
     logger.info(f"          Merge batch size: {BATCH_SIZE}")
     intermediate_dir = os.path.join(temp_dir, "batches")
@@ -1593,6 +1706,8 @@ def merge_pdfs(files_to_merge: List[Dict], project_name: str, temp_dir: str) -> 
     if not batch_files:
         raise Exception("No valid batches were created.")
 
+    log_memory("[AFTER PHASE A - Batches Created]")
+
     # --- PHASE B: INCREMENTAL ASSEMBLY ---
     logger.info(f"          Assembling final PDF from {len(batch_files)} batches...")
     
@@ -1636,6 +1751,8 @@ def merge_pdfs(files_to_merge: List[Dict], project_name: str, temp_dir: str) -> 
 
     if os.path.exists(batch_files[0]):
         os.remove(batch_files[0])
+
+    log_memory("[AFTER PHASE B - Assembly Complete]")
 
     # --- PHASE C: ADD TOC ---
     # insert_pdf() does NOT merge TOCs, so we add the global TOC at the end
@@ -1683,6 +1800,7 @@ def merge_pdfs(files_to_merge: List[Dict], project_name: str, temp_dir: str) -> 
         
         # Force garbage collection after TOC operation
         gc.collect()
+        log_memory("[AFTER PHASE C - TOC Added]")
         
     except Exception as toc_error:
         # If TOC fails, the PDF is still valid - just log warning
@@ -1704,6 +1822,9 @@ def merge_pdfs(files_to_merge: List[Dict], project_name: str, temp_dir: str) -> 
 
     total_time = time.time() - merge_start
     final_size_mb = os.path.getsize(final_output_path) / (1024 * 1024)
+    
+    # Clean up old PDFs for this project (keep only the latest)
+    cleanup_old_pdfs_per_project()
     
     logger.info(f"          ✓ MERGE COMPLETE: {actual_page_count} pages, {final_size_mb:.2f} MB")
     
