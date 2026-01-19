@@ -32,8 +32,8 @@ class Settings(BaseSettings):
     
     # Performance (Memory-Tunable for low-RAM environments like Render.com)
     MAX_CONCURRENT_DOWNLOADS: int = 3  # Reduced from 10 to prevent OOM on 2GB RAM
-    MERGE_BATCH_SIZE: int = 15  # Batch size for PDF merging (lower = less memory)
-    LOW_MEMORY_MODE: bool = True  # Enable conservative memory usage
+    MERGE_BATCH_SIZE: int = 10  # Batch size for PDF merging (lower = less memory, was 15)
+    LOW_MEMORY_MODE: bool = True  # Enable conservative memory usage (skips TOC, aggressive gc)
     DOWNLOAD_TIMEOUT: int = 300  # 5 minutes
     JOB_TIMEOUT: int = 1800  # 30 minutes
     
