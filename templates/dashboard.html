@@ -522,6 +522,29 @@
             background: #c0392b !important;
         }
 
+        .delete-btn {
+            background: #ff5441 !important;
+            color: white !important;
+            border: none !important;
+            padding: 6px 12px !important;
+            border-radius: 4px !important;
+            cursor: pointer !important;
+            font-size: 12px !important;
+            font-weight: 600 !important;
+            transition: background 0.2s;
+            margin-left: 8px;
+        }
+
+        .delete-btn:hover {
+            background: #c0392b !important;
+        }
+
+        .action-buttons {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
         .history-footer {
             margin-top: 15px;
             font-size: 12px;
@@ -602,7 +625,7 @@
                 <span id="rate-limit-text" class="rate-limit-text">Loading...</span>
             </div>
             <div>
-                <span style="font-size: 10px; color: #888;">Version 1.1.3</span>
+                <span style="font-size: 10px; color: #888;">Version 1.1.4</span>
             </div>
         </div>
     </div>
@@ -622,7 +645,7 @@
         <div id="discipline-section" style="display:none;">
             <label class="label">Select Disciplines <span id="discipline-count" style="color: #888; font-size: 11px; font-weight: normal;">(0 displayed, 0 selected)</span></label>
                 <div class="btn-group">
-                    <button class="btn btn-secondary" onclick="selectAllDisciplines()">Select All</button>
+                    <button id="select-all-disciplines-btn" class="btn btn-secondary" onclick="selectAllDisciplines()" disabled>Select All</button>
                     <button class="btn btn-secondary" onclick="deselectAllDisciplines()">Deselect All</button>
         </div>
             <select id="discipline-select" multiple size="6" onchange="updateDisciplineCount(); loadDrawings();"></select>
@@ -630,7 +653,7 @@
             <div id="drawings-section" style="display:none; margin-top: 15px;">
                 <label class="label">Select Drawings (or leave empty for all) <span id="drawing-count" style="color: #888; font-size: 11px; font-weight: normal;">(0 displayed, 0 selected)</span></label>
                 <div class="btn-group">
-                    <button class="btn btn-secondary" onclick="selectAllDrawings()">Select All</button>
+                    <button id="select-all-drawings-btn" class="btn btn-secondary" onclick="selectAllDrawings()" disabled>Select All</button>
                     <button class="btn btn-secondary" onclick="deselectAllDrawings()">Deselect All</button>
                 </div>
                 <select id="drawing-select" multiple size="8" onchange="updateDrawingCount();"></select>
@@ -964,9 +987,11 @@
 
         function loadDisciplines() {
             const pid = document.getElementById('project-select').value;
+            const selectAllBtn = document.getElementById('select-all-disciplines-btn');
             if (!pid) {
                 document.getElementById('discipline-section').style.display = 'none';
                 document.getElementById('drawings-section').style.display = 'none';
+                if (selectAllBtn) selectAllBtn.disabled = true;
                 return;
             }
             document.getElementById('discipline-section').style.display = 'block';
@@ -974,6 +999,7 @@
                 const sel = document.getElementById('discipline-select');
             sel.innerHTML = '<option disabled style="color: #666; text-align: center;">⏳ Loading disciplines...</option>';
             sel.disabled = true;
+            if (selectAllBtn) selectAllBtn.disabled = true;
             
             authenticatedFetch(`/api/disciplines?project_id=${pid}`)
                 .then(r => {
@@ -1000,9 +1026,15 @@
                             addConsoleLog(`Loaded ${data.disciplines.length} disciplines`, 'info');
                         }
                         updateDisciplineCount();
+                        // Enable Select All button now that disciplines are loaded
+                        const selectAllBtn = document.getElementById('select-all-disciplines-btn');
+                        if (selectAllBtn) selectAllBtn.disabled = false;
                     } else {
                         sel.innerHTML = '<option disabled style="color: #666;">No disciplines found</option>';
                         updateDisciplineCount();
+                        // Keep button disabled if no disciplines found
+                        const selectAllBtn = document.getElementById('select-all-disciplines-btn');
+                        if (selectAllBtn) selectAllBtn.disabled = true;
                     }
                 })
                 .catch(error => {
@@ -1012,6 +1044,9 @@
                     sel.disabled = false;
                     sel.innerHTML = '<option disabled style="color: #e74c3c;">❌ Error loading disciplines</option>';
                     addConsoleLog('Failed to load disciplines', 'warn');
+                    // Keep button disabled on error
+                    const selectAllBtn = document.getElementById('select-all-disciplines-btn');
+                    if (selectAllBtn) selectAllBtn.disabled = true;
                 });
         }
 
@@ -1022,14 +1057,19 @@
             
             if (!pid || selectedDisciplines.length === 0) {
                 document.getElementById('drawings-section').style.display = 'none';
+                // Disable Select All button when drawings section is hidden
+                const selectAllDrawingsBtn = document.getElementById('select-all-drawings-btn');
+                if (selectAllDrawingsBtn) selectAllDrawingsBtn.disabled = true;
                 return;
             }
             
             // Show drawings section
             document.getElementById('drawings-section').style.display = 'block';
             const drawingSel = document.getElementById('drawing-select');
+            const selectAllDrawingsBtn = document.getElementById('select-all-drawings-btn');
             drawingSel.innerHTML = '<option disabled style="color: #666;">⏳ Loading drawings...</option>';
             drawingSel.disabled = true;
+            if (selectAllDrawingsBtn) selectAllDrawingsBtn.disabled = true;
             
             // Load drawings for all selected disciplines
             const allDrawings = [];
@@ -1071,9 +1111,15 @@
                         
                         addConsoleLog(`Loaded ${allDrawings.length} drawings from ${selectedDisciplines.length} discipline(s)`, 'info');
                         updateDrawingCount();
+                        // Enable Select All button now that drawings are loaded
+                        const selectAllDrawingsBtn = document.getElementById('select-all-drawings-btn');
+                        if (selectAllDrawingsBtn) selectAllDrawingsBtn.disabled = false;
                     } else {
                         drawingSel.innerHTML = '<option disabled style="color: #666;">No drawings found</option>';
                         updateDrawingCount();
+                        // Keep button disabled if no drawings found
+                        const selectAllDrawingsBtn = document.getElementById('select-all-drawings-btn');
+                        if (selectAllDrawingsBtn) selectAllDrawingsBtn.disabled = true;
                     }
                 })
                 .catch(error => {
@@ -1082,6 +1128,9 @@
                         drawingSel.innerHTML = '<option disabled style="color: #e74c3c;">❌ Error loading drawings</option>';
                         addConsoleLog('Failed to load drawings', 'warn');
                         updateDrawingCount();
+                        // Keep button disabled on error
+                        const selectAllDrawingsBtn = document.getElementById('select-all-drawings-btn');
+                        if (selectAllDrawingsBtn) selectAllDrawingsBtn.disabled = true;
                     }
                 });
         }
@@ -1159,6 +1208,11 @@
             drawingSel.innerHTML = "";
             document.getElementById('discipline-section').style.display = 'none';
             document.getElementById('drawings-section').style.display = 'none';
+            // Disable Select All buttons when sections are hidden
+            const selectAllDisciplinesBtn = document.getElementById('select-all-disciplines-btn');
+            const selectAllDrawingsBtn = document.getElementById('select-all-drawings-btn');
+            if (selectAllDisciplinesBtn) selectAllDisciplinesBtn.disabled = true;
+            if (selectAllDrawingsBtn) selectAllDrawingsBtn.disabled = true;
         }
 
         function renderQueue() {
@@ -1359,9 +1413,12 @@
             }
         }
 
-        function loadRecentJobs(forcePage = null) {
+        function loadRecentJobs(forcePage = null, forceRefresh = false) {
             const pageToLoad = forcePage !== null ? forcePage : currentHistoryPage;
-            authenticatedFetch(`/api/recent_jobs?page=${pageToLoad}&per_page=6`)
+            const cacheBuster = forceRefresh ? `&_t=${new Date().getTime()}` : '';
+            authenticatedFetch(`/api/recent_jobs?page=${pageToLoad}&per_page=6${cacheBuster}`, {
+                cache: forceRefresh ? 'no-cache' : 'default'
+            })
                 .then(r => r.json())
                 .then(data => {
                     const jobs = data.jobs || [];
@@ -1422,7 +1479,7 @@
 
                     // Show cancel button for queued, processing, or uploading jobs
                     if (j.status === 'queued' || j.status === 'processing' || j.status === 'uploading') {
-                        actionHtml = `<button onclick="cancelJob('${j.id}')" class="cancel-btn">✕ CANCEL</button>`;
+                        actionHtml = `<div class="action-buttons"><button onclick="cancelJob('${j.id}')" class="cancel-btn">✕ CANCEL</button></div>`;
                     } else if (j.status === 'completed' || j.status === 'failed') {
                         let parts = (j.result_message || "").split("||");
                         let link = parts[0]; 
@@ -1431,26 +1488,33 @@
 
                         // Check if PDF exists
                         const pdfExists = j.pdf_exists !== undefined ? j.pdf_exists : true; // Default to true for backward compatibility
-                        const disabledClass = pdfExists ? "" : " disabled";
-                        const disabledAttr = pdfExists ? "" : ' onclick="return false;"';
 
+                        let resultHtml = '';
+                        // If completed with no error message, upload succeeded - show success message
                         if (j.status === 'completed' && !errorMsg) {
-                            if (pdfExists) {
-                                actionHtml = `<a href="${link}" target="_blank" class="download-btn">⬇️ PDF</a>`;
+                            resultHtml = `<span style="color:#27ae60; font-size:12px; font-weight:600;">✅ Uploaded to Procore</span>`;
+                        } 
+                        // If completed with error message, upload failed - show PDF download button
+                        else if (j.status === 'completed' && errorMsg) {
+                            if (pdfExists && link) {
+                                resultHtml = `<a href="${link}" target="_blank" class="download-btn" style="background:#f39c12">⬇️ PDF</a> <span style="font-size:11px;color:#e74c3c" title="${errorMsg}">⚠️</span>`;
                             } else {
-                                actionHtml = `<span class="download-btn disabled" title="PDF file has been deleted">⬇️ PDF</span>`;
+                                resultHtml = `<span class="download-btn disabled" title="PDF file has been deleted">⬇️ PDF</span> <span style="font-size:11px;color:#e74c3c" title="${errorMsg}">⚠️</span>`;
                             }
-                        } else if (link) {
-                            if (pdfExists) {
-                                actionHtml = `<a href="${link}" target="_blank" class="download-btn" style="background:#f39c12">⬇️ PDF</a> <span style="font-size:11px;color:#e74c3c" title="${errorMsg}">⚠️</span>`;
-                        } else {
-                                actionHtml = `<span class="download-btn disabled" title="PDF file has been deleted">⬇️ PDF</span> <span style="font-size:11px;color:#e74c3c" title="${errorMsg}">⚠️</span>`;
-                            }
-                        } else {
-                            actionHtml = `<span style="color:#e74c3c">Failed</span>`;
                         }
+                        // If failed status, show PDF download button if available
+                        else if (j.status === 'failed') {
+                            if (pdfExists && link) {
+                                resultHtml = `<a href="${link}" target="_blank" class="download-btn">⬇️ PDF</a>`;
+                            } else if (link) {
+                                resultHtml = `<span class="download-btn disabled" title="PDF file has been deleted">⬇️ PDF</span>`;
+                            } else {
+                                resultHtml = `<span style="color:#e74c3c; font-size:12px;">Failed</span>`;
+                            }
+                        }
+                        actionHtml = `<div class="action-buttons">${resultHtml}<button onclick="deleteJob('${j.id}')" class="delete-btn" title="Delete this job from history">X</button></div>`;
                     } else if (j.status === 'cancelled') {
-                        actionHtml = `<span style="color:#95a5a6; font-size:12px;">Cancelled</span>`;
+                        actionHtml = `<div class="action-buttons"><span style="color:#95a5a6; font-size:12px;">Cancelled</span><button onclick="deleteJob('${j.id}')" class="delete-btn" title="Delete this job from history">X</button></div>`;
                     }
 
                     const tr = document.createElement('tr');
@@ -1598,6 +1662,79 @@
                 if (err.message !== 'Authentication failed') {
                     console.error('Error cancelling job:', err);
                     alert('Error cancelling job: ' + err.message);
+                }
+            });
+        }
+
+        function deleteJob(jobId) {
+            if (!confirm('Are you sure you want to delete this job from history? This action cannot be undone.')) {
+                return;
+            }
+            
+            // Store the job ID for verification
+            const jobToDelete = jobId;
+            
+            authenticatedFetch(`/api/jobs/${jobId}`, {
+                method: 'DELETE',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                cache: 'no-cache'
+            })
+            .then(r => {
+                if (!r.ok) {
+                    return r.json().then(err => {
+                        throw new Error(err.detail || 'Failed to delete job');
+                    });
+                }
+                return r.json();
+            })
+            .then(data => {
+                console.log('Job deleted:', data);
+                addConsoleLog(`Job ${jobToDelete} deleted from history`, 'info');
+                
+                // Wait a moment for the database to commit, then reload with cache busting
+                setTimeout(() => {
+                    // Force reload with cache busting
+                    loadRecentJobs(null, true);
+                    
+                    // After reload, check if we need to adjust the page
+                    setTimeout(() => {
+                        authenticatedFetch(`/api/recent_jobs?page=${currentHistoryPage}&per_page=6&_t=${new Date().getTime()}`, {
+                            cache: 'no-cache'
+                        })
+                            .then(r => r.json())
+                            .then(pageData => {
+                                const jobsOnPage = pageData.jobs || [];
+                                const totalAfterDelete = pageData.pagination?.total || 0;
+                                
+                                // Verify the job was actually deleted
+                                const jobStillExists = jobsOnPage.some(j => j.id === jobToDelete);
+                                if (jobStillExists) {
+                                    console.warn('Job still exists after delete - retrying reload');
+                                    addConsoleLog('Job deletion may not have completed. Retrying...', 'warn');
+                                    // Retry after another moment
+                                    setTimeout(() => loadRecentJobs(null, true), 500);
+                                }
+                                
+                                // If current page is now empty and we're not on page 1, go to previous page
+                                if (jobsOnPage.length === 0 && currentHistoryPage > 1 && totalAfterDelete > 0) {
+                                    currentHistoryPage = currentHistoryPage - 1;
+                                    loadRecentJobs(null, true);
+                                }
+                                updateHistoryCount();
+                            })
+                            .catch(err => {
+                                console.error('Error checking page after delete:', err);
+                                updateHistoryCount();
+                            });
+                    }, 200);
+                }, 100);
+            })
+            .catch(err => {
+                if (err.message !== 'Authentication failed') {
+                    console.error('Error deleting job:', err);
+                    alert('Error deleting job: ' + err.message);
                 }
             });
         }

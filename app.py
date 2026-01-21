@@ -261,6 +261,12 @@ async def lifespan(app: FastAPI):
     # Create output directory
     os.makedirs("output", exist_ok=True)
     
+    # Purge old jobs on startup to ensure we start with only the most recent 25
+    try:
+        purge_old_jobs(keep_count=25)
+    except Exception as e:
+        logger.warning(f"Failed to purge old jobs on startup: {e}")
+    
     yield
     
     # Shutdown
@@ -314,6 +320,66 @@ def encrypt_token(token: str) -> str:
 def decrypt_token(encrypted_token: str) -> str:
     """Decrypt a token."""
     return cipher_suite.decrypt(encrypted_token.encode()).decode()
+
+
+def purge_old_jobs(keep_count: int = 25):
+    """Purge old jobs from database, keeping only the most recent ones.
+    
+    Args:
+        keep_count: Number of most recent jobs to keep (default: 25)
+    """
+    db = SessionLocal()
+    try:
+        # Get total count of jobs
+        total_jobs = db.query(Job).count()
+        
+        if total_jobs <= keep_count:
+            logger.debug(f"Total jobs ({total_jobs}) is within limit ({keep_count}), no purging needed")
+            return
+        
+        # Get all jobs ordered by creation date (newest first)
+        all_jobs = db.query(Job).order_by(Job.created_at.desc()).all()
+        
+        # Keep only the most recent jobs
+        jobs_to_delete = all_jobs[keep_count:]
+        
+        if not jobs_to_delete:
+            return
+        
+        deleted_count = 0
+        for job in jobs_to_delete:
+            # Delete associated PDF file if it exists
+            if job.result_message:
+                pdf_path = job.result_message.split("||")[0].strip()
+                if pdf_path:
+                    # Normalize the path
+                    if pdf_path.startswith("output/"):
+                        full_path = pdf_path
+                    elif pdf_path.startswith("/"):
+                        full_path = os.path.join("output", os.path.basename(pdf_path))
+                    else:
+                        full_path = os.path.join("output", pdf_path)
+                    
+                    # Try to delete the PDF file if it exists
+                    if os.path.exists(full_path) and os.path.isfile(full_path):
+                        try:
+                            os.remove(full_path)
+                            logger.debug(f"Deleted PDF file: {full_path}")
+                        except Exception as e:
+                            logger.warning(f"Could not delete PDF file {full_path}: {e}")
+            
+            # Delete the job record
+            db.delete(job)
+            deleted_count += 1
+        
+        db.commit()
+        logger.info(f"Purged {deleted_count} old job(s), kept {keep_count} most recent")
+        
+    except Exception as e:
+        logger.error(f"Error purging old jobs: {e}", exc_info=True)
+        db.rollback()
+    finally:
+        db.close()
 
 
 # ---------------------------------------------------------
@@ -520,11 +586,22 @@ def process_batch_sequence(job_list: List[dict], access_token: str):
             job_record.status = "completed"
             job_record.progress = 100
             job_record.updated_at = datetime.utcnow()
-            job_record.result_message = os.path.join("output", os.path.basename(local_path))
             
+            # Only save PDF path if upload failed - if successful, PDF is already in Procore
             if upload_result != "Success":
+                job_record.result_message = os.path.join("output", os.path.basename(local_path))
                 job_record.result_message += f"||{upload_result}"
                 logger.warning(f"   ⚠ Upload result: {upload_result}")
+            else:
+                # Upload succeeded - don't save PDF path, it's already in Procore
+                # Delete the local PDF file since it's no longer needed
+                job_record.result_message = None
+                try:
+                    if local_path and os.path.exists(local_path) and os.path.isfile(local_path):
+                        os.remove(local_path)
+                        logger.info(f"   ✓ Deleted local PDF file (already in Procore): {os.path.basename(local_path)}")
+                except Exception as e:
+                    logger.warning(f"   ⚠ Could not delete local PDF file: {e}")
             
             job_time = time.time() - job_start_time
             logger.info(f"   ✓ Upload complete (took {upload_time:.2f}s)")
@@ -576,6 +653,12 @@ def process_batch_sequence(job_list: List[dict], access_token: str):
     logger.info(f"═══════════════════════════════════════════════════════════")
 
     db.close()
+    
+    # Purge old jobs after batch processing completes
+    try:
+        purge_old_jobs(keep_count=25)
+    except Exception as e:
+        logger.warning(f"Failed to purge old jobs: {e}")
 
 
 # ---------------------------------------------------------
@@ -1225,6 +1308,47 @@ async def cancel_job(
     
     logger.info(f"Job {job_id} cancelled by user")
     return {"status": "cancelled", "job_id": job_id}
+
+
+@app.delete("/api/jobs/{job_id}")
+@limiter.limit("10/minute")
+async def delete_job(
+    request: Request,
+    job_id: str,
+    db: Session = Depends(get_db)
+):
+    """Delete a job from the job history."""
+    job_record = db.query(Job).filter(Job.id == job_id).first()
+    
+    if not job_record:
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    # Optionally delete associated PDF file if it exists
+    if job_record.result_message:
+        pdf_path = job_record.result_message.split("||")[0].strip()
+        if pdf_path:
+            # Normalize the path
+            if pdf_path.startswith("output/"):
+                full_path = pdf_path
+            elif pdf_path.startswith("/"):
+                full_path = os.path.join("output", os.path.basename(pdf_path))
+            else:
+                full_path = os.path.join("output", pdf_path)
+            
+            # Try to delete the PDF file if it exists
+            if os.path.exists(full_path) and os.path.isfile(full_path):
+                try:
+                    os.remove(full_path)
+                    logger.info(f"Deleted PDF file: {full_path}")
+                except Exception as e:
+                    logger.warning(f"Could not delete PDF file {full_path}: {e}")
+    
+    # Delete the job record
+    db.delete(job_record)
+    db.commit()
+    
+    logger.info(f"Job {job_id} deleted from history")
+    return {"status": "deleted", "job_id": job_id}
 
 
 @app.post("/api/start_job")
