@@ -681,7 +681,7 @@
         </div>
         
         <div id="simple-mode-actions" style="display:none; margin-top: 15px; gap: 10px;">
-            <button id="add-to-queue-simple-btn" class="btn btn-primary" onclick="addToQueue()" style="flex: 1;">⬇️ Add to Queue</button>
+            <button id="add-to-queue-simple-btn" class="btn btn-primary" onclick="runProjectDirectly()" style="flex: 1;">► Run Now</button>
             <button id="schedule-simple-btn" class="btn btn-secondary" onclick="scheduleProjectDirectly()" style="flex: 1;">📅 Schedule</button>
         </div>
         
@@ -1305,7 +1305,14 @@
 
         function renderQueue() {
             const list = document.getElementById('queue-list');
-            document.getElementById('queue-section').style.display = jobQueue.length ? 'block' : 'none';
+            const queueSection = document.getElementById('queue-section');
+            // In simple mode, never show the queue section
+            if (!isDeveloperMode) {
+                queueSection.style.display = 'none';
+                return;
+            }
+            // Developer mode: show queue section when there are items
+            queueSection.style.display = jobQueue.length ? 'block' : 'none';
             list.innerHTML = '';
             jobQueue.forEach((j, i) => {
                 const li = document.createElement('li');
@@ -1316,6 +1323,63 @@
                 li.innerHTML = `<span>${desc}</span> <span class="remove-link" onclick="jobQueue.splice(${i},1);renderQueue()">DELETE</span>`;
                 list.appendChild(li);
             });
+        }
+
+        // Run a project directly in simple mode (without adding to queue first)
+        async function runProjectDirectly() {
+            const pSel = document.getElementById('project-select');
+            const projectId = parseInt(pSel.value);
+            const projectName = pSel.options[pSel.selectedIndex].text;
+            
+            if (!projectId) {
+                return;
+            }
+            
+            const runBtn = document.getElementById('add-to-queue-simple-btn');
+            const scheduleBtn = document.getElementById('schedule-simple-btn');
+            const originalRunHtml = runBtn.innerHTML;
+            
+            // Show loading state immediately to prevent double-clicks
+            runBtn.disabled = true;
+            scheduleBtn.disabled = true;
+            runBtn.innerHTML = '<span class="btn-loading-spinner"></span> Loading...';
+            
+            try {
+                // Auto-fetch all disciplines
+                const discs = await fetchAllDisciplinesForProject(projectId);
+                if (discs.length === 0) {
+                    alert('No disciplines found for this project.');
+                    return;
+                }
+                
+                // Create job data and run immediately
+                const jobData = { 
+                    project_id: projectId, 
+                    project_name: projectName, 
+                    disciplines: discs
+                };
+                
+                // Run the job directly
+                authenticatedFetch('/api/start_job', { 
+                    method: 'POST', 
+                    headers: { 'Content-Type': 'application/json' }, 
+                    body: JSON.stringify({ queue: [jobData] }) 
+                })
+                .then(r => r.json())
+                .then(() => { 
+                    // Reset UI
+                    pSel.value = "";
+                    document.getElementById('simple-mode-actions').style.display = 'none';
+                })
+                .catch(err => {
+                    console.error('Error starting job:', err);
+                });
+            } finally {
+                // Restore buttons if we didn't navigate away (e.g. on error)
+                runBtn.disabled = false;
+                scheduleBtn.disabled = false;
+                runBtn.innerHTML = originalRunHtml;
+            }
         }
 
         function executeBatch() {
