@@ -224,6 +224,25 @@
             font-size: 16px;
         }
 
+        .btn:disabled {
+            cursor: not-allowed;
+            opacity: 0.7;
+        }
+
+        .btn-loading-spinner {
+            display: inline-block;
+            width: 14px;
+            height: 14px;
+            border: 2px solid rgba(255,255,255,0.3);
+            border-top-color: #fff;
+            border-radius: 50%;
+            animation: btn-spin 0.7s linear infinite;
+            vertical-align: middle;
+            margin-right: 8px;
+        }
+        .btn.btn-secondary .btn-loading-spinner { border-top-color: #e0e0e0; border-color: rgba(255,255,255,0.2); }
+        @keyframes btn-spin { to { transform: rotate(360deg); } }
+
         #discipline-select {
             background: #2a2a2a;
             border: 1px solid #3a3a3a;
@@ -434,46 +453,6 @@
             margin-top: 5px;
         }
 
-        /* SYSTEM CONSOLE */
-        .console-panel {
-            grid-column: 2;
-            grid-row: 2;
-            max-height: 300px;
-            overflow-y: auto;
-        }
-
-        .console {
-            background: #0f0f0f;
-            border: 1px solid #2a2a2a;
-            border-radius: 6px;
-            padding: 15px;
-            font-family: 'Courier New', monospace;
-            font-size: 12px;
-            max-height: 250px;
-            overflow-y: auto;
-        }
-
-        .console-line {
-            margin-bottom: 8px;
-            display: flex;
-            gap: 10px;
-        }
-
-        .console-time {
-            color: #666;
-        }
-
-        .console-info {
-            color: #3498db;
-        }
-
-        .console-warn {
-            color: #f39c12;
-        }
-
-        .console-success {
-            color: #27ae60;
-        }
 
         /* JOB HISTORY */
         .history-panel {
@@ -636,10 +615,6 @@
                 grid-column: 1;
                 grid-row: 2;
             }
-            .console-panel {
-                grid-column: 1;
-                grid-row: 3;
-            }
             .history-panel {
                 grid-column: 1;
                 grid-row: 4;
@@ -667,6 +642,9 @@
             <div>
                 <span style="font-size: 10px; color: #888;">Version 1.1.5</span>
             </div>
+            <div id="dev-mode-indicator" style="display: none; margin-left: 15px; padding: 4px 8px; background: #f39c12; color: #000; border-radius: 4px; font-size: 10px; font-weight: bold;">
+                DEV MODE
+            </div>
         </div>
     </div>
 
@@ -675,7 +653,7 @@
         <!-- JOB MANAGER -->
         <div class="panel job-manager">
             <div class="panel-title">🚀 JOB MANAGER</div>
-            <div class="panel-subtitle">v2.4.0-PRO</div>
+            
             
             <label class="label">1. BUILD YOUR QUEUE</label>
         <select id="project-select" onchange="loadDisciplines()">
@@ -699,7 +677,32 @@
                 <select id="drawing-select" multiple size="8" onchange="updateDrawingCount();"></select>
             </div>
             
-            <button class="btn btn-primary" onclick="addToQueue()" style="margin-top: 15px;">⬇️ Add to Queue</button>
+            <button id="add-to-queue-dev-btn" class="btn btn-primary" onclick="addToQueue()" style="margin-top: 15px;">⬇️ Add to Queue</button>
+        </div>
+        
+        <div id="simple-mode-actions" style="display:none; margin-top: 15px; gap: 10px;">
+            <button id="add-to-queue-simple-btn" class="btn btn-primary" onclick="addToQueue()" style="flex: 1;">⬇️ Add to Queue</button>
+            <button id="schedule-simple-btn" class="btn btn-secondary" onclick="scheduleProjectDirectly()" style="flex: 1;">📅 Schedule</button>
+        </div>
+        
+        <!-- Schedule options for direct scheduling in simple mode (outside queue section) -->
+        <div id="schedule-options-simple" style="margin-top: 20px; display:none;">
+            <label class="label">📅 Schedule Automation</label>
+            <p id="tz-display-simple" style="font-size:11px; color:#888; margin-bottom:10px;"></p>
+            <div style="display:flex; gap:10px;">
+                <select id="sched-day-simple">
+                    <option value="Mon">Monday</option>
+                    <option value="Tue">Tuesday</option>
+                    <option value="Wed">Wednesday</option>
+                    <option value="Thu">Thursday</option>
+                    <option value="Fri" selected>Friday</option>
+                    <option value="Sat">Saturday</option>
+                    <option value="Sun">Sunday</option>
+                </select>
+                <input type="time" id="sched-time-simple" value="17:30">
+            </div>
+            <button class="btn btn-primary btn-large" onclick="confirmScheduleSimple()" style="margin-top: 10px;">✅ Save Automation</button>
+            <button class="btn btn-secondary" onclick="cancelScheduleSimple()" style="margin-top: 10px; margin-left: 10px;">Cancel</button>
         </div>
         
             
@@ -748,22 +751,6 @@
         </div>
 
 
-        <!-- SYSTEM CONSOLE -->
-        <div class="panel console-panel">
-            <div class="panel-title"><> SYSTEM CONSOLE</div>
-            <div class="console" id="console">
-                <div class="console-line">
-                    <span class="console-time">[14:48:01]</span>
-                    <span class="console-info">INFO:</span>
-                    <span>Initializing document parsing engine...</span>
-                </div>
-                <div class="console-line">
-                    <span class="console-time">[14:48:05]</span>
-                    <span class="console-info">INFO:</span>
-                    <span>Connecting to Procore API...</span>
-        </div>
-    </div>
-    </div>
 
         <!-- RECENT JOB HISTORY -->
         <div class="panel history-panel">
@@ -797,11 +784,38 @@
     </div>
 
     <script>
+        // Mode detection: Simple mode (default) or Developer mode (?mode=dev)
+        const isDeveloperMode = new URLSearchParams(window.location.search).get('mode') === 'dev';
+        
+        // Show developer mode indicator if in dev mode
+        if (isDeveloperMode) {
+            document.getElementById('dev-mode-indicator').style.display = 'block';
+        }
+        
         let jobQueue = [];
+        let directScheduleProject = null; // Store project for direct scheduling in simple mode
         const userTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-        let consoleLines = [];
         let isRedirecting = false;
         let currentHistoryPage = 1;
+
+        // Helper function to fetch all disciplines for a project (used in simple mode)
+        async function fetchAllDisciplinesForProject(projectId) {
+            try {
+                const response = await authenticatedFetch(`/api/disciplines?project_id=${projectId}`);
+                if (!response.ok) {
+                    throw new Error('Failed to load disciplines');
+                }
+                const data = await response.json();
+                if (data.disciplines && data.disciplines.length > 0) {
+                    // Handle both formats: [{name, count}] or [string]
+                    return data.disciplines.map(d => typeof d === 'object' ? (d.name || d) : d);
+                }
+                return [];
+            } catch (error) {
+                console.error('Error fetching all disciplines:', error);
+                return [];
+            }
+        }
 
         // Centralized fetch wrapper that handles authentication failures
         function authenticatedFetch(url, options = {}) {
@@ -811,8 +825,6 @@
                     if (response.status === 401 || response.status === 403) {
                         if (!isRedirecting) {
                             isRedirecting = true;
-                            // Show notification
-                            addConsoleLog('⚠️ Procore connection lost. Redirecting to login...', 'warn');
                             
                             // Show visual notification overlay
                             const overlay = document.createElement('div');
@@ -893,25 +905,6 @@
             });
         }, 1000);
 
-        function addConsoleLog(message, type = 'info') {
-            const now = new Date();
-            const timeStr = now.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
-            const console = document.getElementById('console');
-            const line = document.createElement('div');
-            line.className = 'console-line';
-            line.innerHTML = `
-                <span class="console-time">[${timeStr}]</span>
-                <span class="console-${type}">${type.toUpperCase()}:</span>
-                <span>${message}</span>
-            `;
-            console.appendChild(line);
-            console.scrollTop = console.scrollHeight;
-            consoleLines.push({ time: timeStr, type, message });
-            if (consoleLines.length > 50) {
-                consoleLines.shift();
-                console.removeChild(console.firstChild);
-            }
-        }
 
         function updateHistoryCount() {
             authenticatedFetch(`/api/recent_jobs?page=${currentHistoryPage}&per_page=6`)
@@ -1032,12 +1025,31 @@
             if (!pid) {
                 document.getElementById('discipline-section').style.display = 'none';
                 document.getElementById('drawings-section').style.display = 'none';
+                document.getElementById('simple-mode-actions').style.display = 'none';
                 if (selectAllBtn) selectAllBtn.disabled = true;
                 return;
             }
+            
+            // Simple mode: Hide discipline/drawing sections, show action buttons
+            if (!isDeveloperMode) {
+                document.getElementById('discipline-section').style.display = 'none';
+                document.getElementById('drawings-section').style.display = 'none';
+                const simpleActions = document.getElementById('simple-mode-actions');
+                simpleActions.style.display = 'flex';
+                simpleActions.style.flexDirection = 'row';
+                document.getElementById('add-to-queue-dev-btn').style.display = 'none';
+                // In simple mode, disciplines will be auto-fetched when adding to queue or scheduling
+                return;
+            }
+            
+            // Developer mode: Hide simple mode buttons
+            document.getElementById('simple-mode-actions').style.display = 'none';
+            document.getElementById('add-to-queue-dev-btn').style.display = 'block';
+            
+            // Developer mode: Show discipline section and load disciplines
             document.getElementById('discipline-section').style.display = 'block';
             document.getElementById('drawings-section').style.display = 'none';
-                const sel = document.getElementById('discipline-select');
+            const sel = document.getElementById('discipline-select');
             sel.innerHTML = '<option disabled style="color: #666; text-align: center;">⏳ Loading disciplines...</option>';
             sel.disabled = true;
             if (selectAllBtn) selectAllBtn.disabled = true;
@@ -1060,11 +1072,9 @@
                                 sel.innerHTML += `<option value="${name}">${name} (${count} drawing${count !== 1 ? 's' : ''})</option>`;
                             });
                             const totalDrawings = data.disciplines.reduce((sum, d) => sum + (d.count || 0), 0);
-                            addConsoleLog(`Loaded ${data.disciplines.length} disciplines with ${totalDrawings} total drawings`, 'info');
                         } else {
                             // Legacy format - just strings
                             data.disciplines.forEach(d => sel.innerHTML += `<option value="${d}">${d}</option>`);
-                            addConsoleLog(`Loaded ${data.disciplines.length} disciplines`, 'info');
                         }
                         updateDisciplineCount();
                         // Enable Select All button now that disciplines are loaded
@@ -1084,7 +1094,6 @@
                     }
                     sel.disabled = false;
                     sel.innerHTML = '<option disabled style="color: #e74c3c;">❌ Error loading disciplines</option>';
-                    addConsoleLog('Failed to load disciplines', 'warn');
                     // Keep button disabled on error
                     const selectAllBtn = document.getElementById('select-all-disciplines-btn');
                     if (selectAllBtn) selectAllBtn.disabled = true;
@@ -1150,7 +1159,6 @@
                             drawingSel.innerHTML += `<option value="${d.id}" data-number="${d.number}" data-discipline="${d.discipline}">${optionText}</option>`;
                         });
                         
-                        addConsoleLog(`Loaded ${allDrawings.length} drawings from ${selectedDisciplines.length} discipline(s)`, 'info');
                         updateDrawingCount();
                         // Enable Select All button now that drawings are loaded
                         const selectAllDrawingsBtn = document.getElementById('select-all-drawings-btn');
@@ -1167,7 +1175,6 @@
                     if (error.message !== 'Authentication failed') {
                         drawingSel.disabled = false;
                         drawingSel.innerHTML = '<option disabled style="color: #e74c3c;">❌ Error loading drawings</option>';
-                        addConsoleLog('Failed to load drawings', 'warn');
                         updateDrawingCount();
                         // Keep button disabled on error
                         const selectAllDrawingsBtn = document.getElementById('select-all-drawings-btn');
@@ -1218,28 +1225,67 @@
 
         function addToQueue() {
             const pSel = document.getElementById('project-select');
+            const projectId = parseInt(pSel.value);
+            const projectName = pSel.options[pSel.selectedIndex].text;
+            
+            if (!projectId) {
+                return;
+            }
+            
+            // Simple mode: Auto-fetch all disciplines
+            if (!isDeveloperMode) {
+                const addBtn = document.getElementById('add-to-queue-simple-btn');
+                const scheduleBtn = document.getElementById('schedule-simple-btn');
+                const originalAddHtml = addBtn.innerHTML;
+                addBtn.disabled = true;
+                scheduleBtn.disabled = true;
+                addBtn.innerHTML = '<span class="btn-loading-spinner"></span> Loading...';
+                
+                fetchAllDisciplinesForProject(projectId).then(discs => {
+                    try {
+                        if (discs.length === 0) {
+                            alert('No disciplines found for this project.');
+                            return;
+                        }
+                        
+                        const jobData = { 
+                            project_id: projectId, 
+                            project_name: projectName, 
+                            disciplines: discs
+                        };
+                        
+                        jobQueue.push(jobData);
+                        renderQueue();
+                        pSel.value = "";
+                        document.getElementById('simple-mode-actions').style.display = 'none';
+                    } finally {
+                        addBtn.disabled = false;
+                        scheduleBtn.disabled = false;
+                        addBtn.innerHTML = originalAddHtml;
+                    }
+                });
+                return;
+            }
+            
+            // Developer mode: Require discipline selection
             const dSel = document.getElementById('discipline-select');
             const drawingSel = document.getElementById('drawing-select');
             const discs = Array.from(dSel.selectedOptions).map(o => o.value);
             const selectedDrawings = Array.from(drawingSel.selectedOptions).map(o => o.value);
             
             if (discs.length === 0) {
-                addConsoleLog('No disciplines selected', 'warn');
                 return;
             }
             
             const jobData = { 
-                project_id: parseInt(pSel.value), 
-                project_name: pSel.options[pSel.selectedIndex].text, 
+                project_id: projectId, 
+                project_name: projectName, 
                 disciplines: discs
             };
             
             // If specific drawings are selected, include them; otherwise process all drawings in disciplines
             if (selectedDrawings.length > 0) {
                 jobData.drawing_ids = selectedDrawings.map(id => parseInt(id)); // Convert to integers
-                addConsoleLog(`Added ${pSel.options[pSel.selectedIndex].text} with ${selectedDrawings.length} selected drawing(s) to queue`, 'success');
-            } else {
-                addConsoleLog(`Added ${pSel.options[pSel.selectedIndex].text} with all drawings from selected disciplines to queue`, 'success');
             }
             
             jobQueue.push(jobData);
@@ -1249,6 +1295,7 @@
             drawingSel.innerHTML = "";
             document.getElementById('discipline-section').style.display = 'none';
             document.getElementById('drawings-section').style.display = 'none';
+            document.getElementById('add-to-queue-simple-btn').style.display = 'none';
             // Disable Select All buttons when sections are hidden
             const selectAllDisciplinesBtn = document.getElementById('select-all-disciplines-btn');
             const selectAllDrawingsBtn = document.getElementById('select-all-drawings-btn');
@@ -1273,10 +1320,8 @@
 
         function executeBatch() {
             if (jobQueue.length === 0) {
-                addConsoleLog('Queue is empty', 'warn');
                 return;
             }
-            addConsoleLog(`Starting batch job with ${jobQueue.length} project(s)`, 'info');
             authenticatedFetch('/api/start_job', { 
                 method: 'POST', 
                 headers: { 'Content-Type': 'application/json' }, 
@@ -1286,18 +1331,97 @@
             .then(() => { 
                 jobQueue = []; 
                 renderQueue(); 
-                addConsoleLog('Batch job initiated successfully', 'success');
             })
             .catch(err => {
-                if (err.message !== 'Authentication failed') {
-                    addConsoleLog('Failed to start batch job', 'warn');
+                // Error handling
+            });
+        }
+
+        // Schedule a project directly in simple mode (without adding to queue first)
+        async function scheduleProjectDirectly() {
+            const pSel = document.getElementById('project-select');
+            const projectId = parseInt(pSel.value);
+            const projectName = pSel.options[pSel.selectedIndex].text;
+            
+            if (!projectId) {
+                return;
+            }
+            
+            const scheduleBtn = document.getElementById('schedule-simple-btn');
+            const addBtn = document.getElementById('add-to-queue-simple-btn');
+            const originalScheduleHtml = scheduleBtn.innerHTML;
+            
+            // Show loading state immediately to prevent double-clicks
+            scheduleBtn.disabled = true;
+            addBtn.disabled = true;
+            scheduleBtn.innerHTML = '<span class="btn-loading-spinner"></span> Loading...';
+            
+            try {
+                // Auto-fetch all disciplines
+                const discs = await fetchAllDisciplinesForProject(projectId);
+                if (discs.length === 0) {
+                    alert('No disciplines found for this project.');
+                    return;
                 }
+                
+                // Store project data for scheduling (don't add to visible queue)
+                directScheduleProject = { 
+                    project_id: projectId, 
+                    project_name: projectName, 
+                    disciplines: discs
+                };
+                
+                // Hide simple mode actions and show schedule options directly
+                document.getElementById('simple-mode-actions').style.display = 'none';
+                document.getElementById('schedule-options-simple').style.display = 'block';
+                document.getElementById('tz-display-simple').innerText = `Detected Timezone: ${userTimezone}`;
+                
+                // Scroll to schedule options
+                document.getElementById('schedule-options-simple').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+            } finally {
+                // Restore buttons if we didn't navigate away (e.g. on error)
+                scheduleBtn.disabled = false;
+                addBtn.disabled = false;
+                scheduleBtn.innerHTML = originalScheduleHtml;
+            }
+        }
+        
+        function cancelScheduleSimple() {
+            directScheduleProject = null;
+            document.getElementById('schedule-options-simple').style.display = 'none';
+            document.getElementById('project-select').value = '';
+        }
+        
+        function confirmScheduleSimple() {
+            const day = document.getElementById('sched-day-simple').value;
+            const time = document.getElementById('sched-time-simple').value;
+            
+            if (!directScheduleProject) {
+                alert('No project selected for scheduling.');
+                return;
+            }
+            
+            authenticatedFetch('/api/schedule_batch', {
+                method: 'POST', 
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ queue: [directScheduleProject], day: day, time: time, timezone: userTimezone })
+            })
+            .then(r => r.json())
+            .then(() => {
+                // Clear stored project
+                directScheduleProject = null;
+                document.getElementById('schedule-options-simple').style.display = 'none';
+                document.getElementById('project-select').value = '';
+                loadSchedules();
+            })
+            .catch(err => {
+                // Error handling
+                console.error('Error scheduling:', err);
             });
         }
 
         function showScheduleOpts() {
             if (jobQueue.length === 0) {
-                addConsoleLog('Build queue first before scheduling', 'warn');
                 return;
             }
             document.getElementById('schedule-options').style.display = 'block';
@@ -1308,24 +1432,37 @@
         function confirmSchedule() {
             const day = document.getElementById('sched-day').value;
             const time = document.getElementById('sched-time').value;
+            
+            // In simple mode direct scheduling, use stored project instead of jobQueue
+            const queueToSchedule = directScheduleProject ? [directScheduleProject] : jobQueue;
+            
+            if (queueToSchedule.length === 0) {
+                alert('No project selected for scheduling.');
+                return;
+            }
+            
             authenticatedFetch('/api/schedule_batch', {
                 method: 'POST', 
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ queue: jobQueue, day: day, time: time, timezone: userTimezone })
+                body: JSON.stringify({ queue: queueToSchedule, day: day, time: time, timezone: userTimezone })
             })
             .then(r => r.json())
             .then(() => {
-                addConsoleLog(`Scheduled automation for ${day} ${time}`, 'success');
+                // Clear stored project and queue
+                directScheduleProject = null;
                 jobQueue = []; 
                 renderQueue(); 
                 document.getElementById('schedule-options').style.display = 'none'; 
                 document.getElementById('main-actions').style.display = 'flex'; 
+                
+                // Reset project select and hide simple mode actions
+                document.getElementById('project-select').value = '';
+                document.getElementById('simple-mode-actions').style.display = 'none';
+                
                 loadSchedules();
             })
             .catch(err => {
-                if (err.message !== 'Authentication failed') {
-                    addConsoleLog('Failed to create schedule', 'warn');
-                }
+                // Error handling
             });
         }
 
@@ -1454,12 +1591,9 @@
                 authenticatedFetch(`/api/schedule/${id}`, { method: 'DELETE' })
                     .then(() => {
                         loadSchedules();
-                        addConsoleLog('Automation deleted', 'info');
                     })
                     .catch(error => {
-                        if (error.message !== 'Authentication failed') {
-                            addConsoleLog('Failed to delete automation', 'warn');
-                        }
+                        // Error handling
                     });
             }
         }
@@ -1532,33 +1666,69 @@
                     if (j.status === 'queued' || j.status === 'processing' || j.status === 'uploading') {
                         actionHtml = `<div class="action-buttons"><button onclick="cancelJob('${j.id}')" class="cancel-btn">✕ CANCEL</button></div>`;
                     } else if (j.status === 'completed' || j.status === 'failed') {
+                        // Parse result_message for error (backward compat)
                         let parts = (j.result_message || "").split("||");
-                        let link = parts[0]; 
                         let errorMsg = parts[1];
-                        if (link && !link.startsWith("/")) link = "/" + link;
+                        
+                        // Try to parse JSON from result_message to get error
+                        try {
+                            const resultData = JSON.parse(j.result_message || "{}");
+                            if (resultData.error) {
+                                errorMsg = resultData.error;
+                            }
+                        } catch (e) {
+                            // Not JSON, use legacy format
+                        }
 
-                        // Check if PDF exists
-                        const pdfExists = j.pdf_exists !== undefined ? j.pdf_exists : true; // Default to true for backward compatibility
+                        // Get PDF paths from API response (new format) or fallback to legacy
+                        let pdfPaths = j.pdf_paths || [];
+                        if (pdfPaths.length === 0 && j.pdf_exists !== undefined) {
+                            // Backward compat: if pdf_paths not present but pdf_exists is, use legacy parsing
+                            let link = parts[0];
+                            if (link) {
+                                if (!link.startsWith("/")) link = "/" + link;
+                                pdfPaths = [{
+                                    path: link,
+                                    exists: j.pdf_exists !== undefined ? j.pdf_exists : true
+                                }];
+                            }
+                        }
 
                         let resultHtml = '';
                         // If completed with no error message, upload succeeded - show success message
                         if (j.status === 'completed' && !errorMsg) {
                             resultHtml = `<span style="color:#27ae60; font-size:12px; font-weight:600;">✅ Uploaded to Procore</span>`;
                         } 
-                        // If completed with error message, upload failed - show PDF download button
+                        // If completed with error message, upload failed - show PDF download button(s)
                         else if (j.status === 'completed' && errorMsg) {
-                            if (pdfExists && link) {
-                                resultHtml = `<a href="${link}" target="_blank" class="download-btn" style="background:#f39c12">⬇️ PDF</a> <span style="font-size:11px;color:#e74c3c" title="${errorMsg}">⚠️</span>`;
+                            if (pdfPaths.length > 0) {
+                                const downloadLinks = pdfPaths.map(p => {
+                                    const link = p.path.startsWith("/") ? p.path : "/" + p.path;
+                                    const filename = p.path.split("/").pop() || "PDF";
+                                    if (p.exists) {
+                                        return `<a href="${link}" target="_blank" class="download-btn" style="background:#f39c12; margin-right:4px;" title="${filename}">⬇️ ${filename}</a>`;
+                                    } else {
+                                        return `<span class="download-btn disabled" style="margin-right:4px;" title="PDF file has been deleted: ${filename}">⬇️ ${filename}</span>`;
+                                    }
+                                }).join(" ");
+                                resultHtml = downloadLinks + ` <span style="font-size:11px;color:#e74c3c" title="${errorMsg}">⚠️</span>`;
                             } else {
                                 resultHtml = `<span class="download-btn disabled" title="PDF file has been deleted">⬇️ PDF</span> <span style="font-size:11px;color:#e74c3c" title="${errorMsg}">⚠️</span>`;
                             }
                         }
-                        // If failed status, show PDF download button if available
+                        // If failed status, show PDF download button(s) if available
                         else if (j.status === 'failed') {
-                            if (pdfExists && link) {
-                                resultHtml = `<a href="${link}" target="_blank" class="download-btn">⬇️ PDF</a>`;
-                            } else if (link) {
-                                resultHtml = `<span class="download-btn disabled" title="PDF file has been deleted">⬇️ PDF</span>`;
+                            if (pdfPaths.length > 0) {
+                                const downloadLinks = pdfPaths.map(p => {
+                                    const link = p.path.startsWith("/") ? p.path : "/" + p.path;
+                                    const filename = p.path.split("/").pop() || "PDF";
+                                    if (p.exists) {
+                                        return `<a href="${link}" target="_blank" class="download-btn" style="margin-right:4px;" title="${filename}">⬇️ ${filename}</a>`;
+                                    } else {
+                                        return `<span class="download-btn disabled" style="margin-right:4px;" title="PDF file has been deleted: ${filename}">⬇️ ${filename}</span>`;
+                                    }
+                                }).join(" ");
+                                resultHtml = downloadLinks;
                             } else {
                                 resultHtml = `<span style="color:#e74c3c; font-size:12px;">Failed</span>`;
                             }
@@ -1705,7 +1875,6 @@
             })
             .then(data => {
                 console.log('Job cancelled:', data);
-                addConsoleLog(`Job ${jobId} cancelled`, 'warning');
                 // Reload jobs to show updated status
                 loadRecentJobs();
             })
@@ -1742,7 +1911,6 @@
             })
             .then(data => {
                 console.log('Job deleted:', data);
-                addConsoleLog(`Job ${jobToDelete} deleted from history`, 'info');
                 
                 // Wait a moment for the database to commit, then reload with cache busting
                 setTimeout(() => {
@@ -1763,7 +1931,6 @@
                                 const jobStillExists = jobsOnPage.some(j => j.id === jobToDelete);
                                 if (jobStillExists) {
                                     console.warn('Job still exists after delete - retrying reload');
-                                    addConsoleLog('Job deletion may not have completed. Retrying...', 'warn');
                                     // Retry after another moment
                                     setTimeout(() => loadRecentJobs(null, true), 500);
                                 }
@@ -1790,9 +1957,6 @@
             });
         }
 
-        // Initial console messages
-        addConsoleLog('System initialized', 'success');
-        addConsoleLog('Ready for automation tasks', 'info');
     </script>
 </body>
 

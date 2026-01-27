@@ -219,6 +219,14 @@ cp jobs.db jobs_backup_$(date +%Y%m%d).db
 - **Render Dashboard:** https://dashboard.render.com/
 - **Procore Dev Portal:** https://developers.procore.com/
 
+### Dashboard Modes
+- **Simple mode (users):** Project-only UI, auto-fetches all disciplines.  
+  - Local: `http://localhost:8000/`  
+  - Production: `https://YOUR-APP-NAME.onrender.com/`
+- **Developer mode (testing):** Full UI with divisions and individual drawings.  
+  - Local: `http://localhost:8000/?mode=dev`  
+  - Production: `https://YOUR-APP-NAME.onrender.com/?mode=dev`
+
 ---
 
 **Total Time:** ~15 minutes  

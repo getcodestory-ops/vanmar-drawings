@@ -36,6 +36,7 @@ class Settings(BaseSettings):
     LOW_MEMORY_MODE: bool = True  # Enable conservative memory usage (skips TOC, aggressive gc)
     DOWNLOAD_TIMEOUT: int = 300  # 5 minutes
     JOB_TIMEOUT: int = 1800  # 30 minutes
+    DRAWING_DOWNLOAD_RETRIES: int = 3  # Retries per drawing when fetch/download fails
     
     # Rate Limiting
     RATE_LIMIT_PER_MINUTE: int = 5

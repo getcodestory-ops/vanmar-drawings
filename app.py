@@ -81,6 +81,7 @@ class Job(Base):
     error_details = Column(Text, nullable=True)
     total_drawings = Column(Integer, nullable=True)  # Total drawings to process
     processed_drawings = Column(Integer, default=0)  # Drawings processed so far
+    disciplines_json = Column(String, nullable=True)  # JSON array of discipline names for queued job processing
 
 
 class TokenStore(Base):
@@ -202,7 +203,7 @@ async def lifespan(app: FastAPI):
                 # Check if columns exist and add them if missing
                 try:
                     # Try to query the columns - if they don't exist, this will fail
-                    conn.execute(text("SELECT total_drawings, processed_drawings FROM jobs LIMIT 1"))
+                    conn.execute(text("SELECT total_drawings, processed_drawings, disciplines_json FROM jobs LIMIT 1"))
                     logger.info("Database columns already exist")
                 except Exception:
                     # Columns don't exist, add them
@@ -218,6 +219,12 @@ async def lifespan(app: FastAPI):
                         logger.info("Added processed_drawings column")
                     except Exception as e:
                         logger.warning(f"Could not add processed_drawings column (may already exist): {e}")
+                    
+                    try:
+                        conn.execute(text("ALTER TABLE jobs ADD COLUMN disciplines_json TEXT"))
+                        logger.info("Added disciplines_json column")
+                    except Exception as e:
+                        logger.warning(f"Could not add disciplines_json column (may already exist): {e}")
                     
                     logger.info("Database migration completed successfully")
             else:
@@ -238,6 +245,13 @@ async def lifespan(app: FastAPI):
                                 WHERE table_name='jobs' AND column_name='processed_drawings'
                             ) THEN
                                 ALTER TABLE jobs ADD COLUMN processed_drawings INTEGER DEFAULT 0;
+                            END IF;
+                            
+                            IF NOT EXISTS (
+                                SELECT 1 FROM information_schema.columns 
+                                WHERE table_name='jobs' AND column_name='disciplines_json'
+                            ) THEN
+                                ALTER TABLE jobs ADD COLUMN disciplines_json TEXT;
                             END IF;
                         END $$;
                     """))
@@ -322,6 +336,61 @@ def decrypt_token(encrypted_token: str) -> str:
     return cipher_suite.decrypt(encrypted_token.encode()).decode()
 
 
+def extract_pdf_paths_from_result_message(result_message: str) -> List[str]:
+    """
+    Extract all PDF paths from result_message.
+    Supports both JSON format (new) and legacy format (path||error or just path).
+    Returns list of normalized paths.
+    """
+    if not result_message:
+        return []
+    
+    import json
+    paths = []
+    
+    try:
+        # Try to parse as JSON (new format)
+        result_data = json.loads(result_message)
+        if isinstance(result_data, dict) and "paths" in result_data:
+            # New format: {"paths": [...], "error": "..."}
+            pdf_paths = result_data.get("paths", [])
+            for pdf_path in pdf_paths:
+                if pdf_path:
+                    # Normalize the path
+                    if pdf_path.startswith("output/"):
+                        normalized_path = pdf_path
+                    elif pdf_path.startswith("/"):
+                        normalized_path = os.path.join("output", os.path.basename(pdf_path))
+                    else:
+                        normalized_path = os.path.join("output", pdf_path)
+                    paths.append(normalized_path)
+        elif isinstance(result_data, str):
+            # Single path in JSON (backward compat)
+            pdf_path = result_data
+            if pdf_path:
+                if pdf_path.startswith("output/"):
+                    normalized_path = pdf_path
+                elif pdf_path.startswith("/"):
+                    normalized_path = os.path.join("output", os.path.basename(pdf_path))
+                else:
+                    normalized_path = os.path.join("output", pdf_path)
+                paths.append(normalized_path)
+    except (json.JSONDecodeError, ValueError, TypeError):
+        # Legacy format: "path||error" or just "path"
+        pdf_path = result_message.split("||")[0].strip()
+        if pdf_path:
+            # Normalize the path
+            if pdf_path.startswith("output/"):
+                normalized_path = pdf_path
+            elif pdf_path.startswith("/"):
+                normalized_path = os.path.join("output", os.path.basename(pdf_path))
+            else:
+                normalized_path = os.path.join("output", pdf_path)
+            paths.append(normalized_path)
+    
+    return paths
+
+
 def purge_old_jobs(keep_count: int = 25):
     """Purge old jobs from database, keeping only the most recent ones.
     
@@ -348,25 +417,16 @@ def purge_old_jobs(keep_count: int = 25):
         
         deleted_count = 0
         for job in jobs_to_delete:
-            # Delete associated PDF file if it exists
+            # Delete associated PDF file(s) if they exist
             if job.result_message:
-                pdf_path = job.result_message.split("||")[0].strip()
-                if pdf_path:
-                    # Normalize the path
-                    if pdf_path.startswith("output/"):
-                        full_path = pdf_path
-                    elif pdf_path.startswith("/"):
-                        full_path = os.path.join("output", os.path.basename(pdf_path))
-                    else:
-                        full_path = os.path.join("output", pdf_path)
-                    
-                    # Try to delete the PDF file if it exists
-                    if os.path.exists(full_path) and os.path.isfile(full_path):
+                pdf_paths = extract_pdf_paths_from_result_message(job.result_message)
+                for pdf_path in pdf_paths:
+                    if os.path.exists(pdf_path) and os.path.isfile(pdf_path):
                         try:
-                            os.remove(full_path)
-                            logger.debug(f"Deleted PDF file: {full_path}")
+                            os.remove(pdf_path)
+                            logger.debug(f"Deleted PDF file: {pdf_path}")
                         except Exception as e:
-                            logger.warning(f"Could not delete PDF file {full_path}: {e}")
+                            logger.warning(f"Could not delete PDF file {pdf_path}: {e}")
             
             # Delete the job record
             db.delete(job)
@@ -498,7 +558,7 @@ def process_batch_sequence(job_list: List[dict], access_token: str):
         try:
             max_retries = 3
             retry_count = 0
-            local_path = None
+            local_paths = None
             
             while retry_count < max_retries:
                 try:
@@ -508,12 +568,12 @@ def process_batch_sequence(job_list: List[dict], access_token: str):
                     
                     # Run PDF generation
                     if retry_count > 0:
-                        logger.info(f"   [RETRY {retry_count}/{max_retries-1}] Regenerating PDF...")
+                        logger.info(f"   [RETRY {retry_count}/{max_retries-1}] Regenerating PDFs...")
                     else:
-                        logger.info(f"   [PHASE 1/2] Generating PDF...")
+                        logger.info(f"   [PHASE 1/2] Generating PDFs...")
                     
                     pdf_start = time.time()
-                    local_path = core_engine.run_job_api(
+                    local_paths = core_engine.run_job_api(
                         job_meta["project_id"],
                         job_meta["disciplines"],
                         access_token,
@@ -526,7 +586,7 @@ def process_batch_sequence(job_list: List[dict], access_token: str):
                     if cancel_event.is_set():
                         raise Exception("Job was cancelled during PDF generation")
                     
-                    logger.info(f"   ✓ PDF generation complete (took {pdf_time:.2f}s)")
+                    logger.info(f"   ✓ PDF generation complete: {len(local_paths)} file(s) (took {pdf_time:.2f}s)")
                     break  # Success, exit retry loop
                     
                 except Exception as pdf_error:
@@ -540,12 +600,17 @@ def process_batch_sequence(job_list: List[dict], access_token: str):
                         logger.warning(f"   ⚠ PDF validation failed (attempt {retry_count}/{max_retries}): {error_msg}")
                         logger.info(f"   🔄 Restarting process...")
                         # Clean up any partial files
-                        if local_path and os.path.exists(local_path):
-                            try:
-                                os.remove(local_path)
-                                logger.debug(f"   Removed invalid PDF file")
-                            except:
-                                pass
+                        if local_paths:
+                            deleted_count = 0
+                            for path in local_paths:
+                                try:
+                                    if os.path.exists(path) and os.path.isfile(path):
+                                        os.remove(path)
+                                        deleted_count += 1
+                                except:
+                                    pass
+                            if deleted_count > 0:
+                                logger.debug(f"   Removed {deleted_count} invalid PDF file(s)")
                         # Wait a bit before retrying
                         time.sleep(2)
                         continue  # Retry
@@ -553,11 +618,11 @@ def process_batch_sequence(job_list: List[dict], access_token: str):
                         # Not a validation error, or max retries reached
                         raise  # Re-raise the exception
             
-            if not local_path:
+            if not local_paths or len(local_paths) == 0:
                 raise Exception(f"PDF generation failed after {max_retries} attempts")
             
             # Upload phase
-            logger.info(f"   [PHASE 2/2] Uploading to Procore...")
+            logger.info(f"   [PHASE 2/2] Uploading {len(local_paths)} file(s) to Procore...")
             update_db_progress(95, job_record.total_drawings or 0, job_record.total_drawings or 0)
             
             # Check for cancellation before upload
@@ -573,7 +638,7 @@ def process_batch_sequence(job_list: List[dict], access_token: str):
             upload_result = asyncio.run(
                 core_engine.handle_procore_upload(
                     job_meta["project_id"],
-                    local_path,
+                    local_paths,
                     access_token
                 )
             )
@@ -587,21 +652,30 @@ def process_batch_sequence(job_list: List[dict], access_token: str):
             job_record.progress = 100
             job_record.updated_at = datetime.utcnow()
             
-            # Only save PDF path if upload failed - if successful, PDF is already in Procore
+            # Only save PDF paths if upload failed - if successful, PDFs are already in Procore
             if upload_result != "Success":
-                job_record.result_message = os.path.join("output", os.path.basename(local_path))
-                job_record.result_message += f"||{upload_result}"
+                # Store paths as JSON
+                import json
+                paths_json = {
+                    "paths": [os.path.join("output", os.path.basename(p)) for p in local_paths],
+                    "error": upload_result
+                }
+                job_record.result_message = json.dumps(paths_json)
                 logger.warning(f"   ⚠ Upload result: {upload_result}")
             else:
-                # Upload succeeded - don't save PDF path, it's already in Procore
-                # Delete the local PDF file since it's no longer needed
+                # Upload succeeded - don't save PDF paths, they're already in Procore
+                # Delete the local PDF files since they're no longer needed
                 job_record.result_message = None
-                try:
-                    if local_path and os.path.exists(local_path) and os.path.isfile(local_path):
-                        os.remove(local_path)
-                        logger.info(f"   ✓ Deleted local PDF file (already in Procore): {os.path.basename(local_path)}")
-                except Exception as e:
-                    logger.warning(f"   ⚠ Could not delete local PDF file: {e}")
+                deleted_count = 0
+                for path in local_paths:
+                    try:
+                        if os.path.exists(path) and os.path.isfile(path):
+                            os.remove(path)
+                            deleted_count += 1
+                    except Exception as e:
+                        logger.warning(f"   ⚠ Could not delete local PDF file {os.path.basename(path)}: {e}")
+                if deleted_count > 0:
+                    logger.info(f"   ✓ Deleted {deleted_count} local PDF file(s) (already in Procore)")
             
             job_time = time.time() - job_start_time
             logger.info(f"   ✓ Upload complete (took {upload_time:.2f}s)")
@@ -609,7 +683,9 @@ def process_batch_sequence(job_list: List[dict], access_token: str):
             logger.info(f"✅ JOB {job_idx}/{len(job_list)} COMPLETED")
             logger.info(f"   Job ID: {job_id}")
             logger.info(f"   Total time: {job_time:.2f}s ({job_time/60:.1f} minutes)")
-            logger.info(f"   Output: {os.path.basename(local_path)}")
+            logger.info(f"   Output files:")
+            for path in local_paths:
+                logger.info(f"     - {os.path.basename(path)}")
             logger.info(f"═══════════════════════════════════════════════════════════")
 
         except Exception as e:
@@ -652,6 +728,78 @@ def process_batch_sequence(job_list: List[dict], access_token: str):
     logger.info(f"   Completed at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     logger.info(f"═══════════════════════════════════════════════════════════")
 
+    # Check for queued jobs and process them
+    queued_jobs = db.query(Job).filter(Job.status == "queued").order_by(Job.created_at.asc()).all()
+    
+    if queued_jobs:
+        logger.info(f"📋 Found {len(queued_jobs)} queued job(s), processing next batch...")
+        next_batch = []
+        for job in queued_jobs:
+            # Reconstruct job metadata from database
+            try:
+                disciplines = []
+                if hasattr(job, 'disciplines_json') and job.disciplines_json:
+                    try:
+                        parsed = json.loads(job.disciplines_json)
+                        if isinstance(parsed, list):
+                            disciplines = [d if isinstance(d, str) else (d.get("name") or str(d)) for d in parsed]
+                    except Exception:
+                        pass
+                
+                # Fallback: fetch disciplines from Procore when missing (e.g. job created before we stored them)
+                if not disciplines and job.project_id:
+                    try:
+                        result = core_engine.api_get_disciplines(int(job.project_id), access_token)
+                        if isinstance(result, dict) and "error" not in result and result.get("disciplines"):
+                            disciplines = result["disciplines"]
+                            logger.info(f"   Job {job.id}: no disciplines stored; using all disciplines for project {job.project_id} ({len(disciplines)} discipline(s))")
+                        else:
+                            err = result.get("error", "Unknown error") if isinstance(result, dict) else "No disciplines returned"
+                            raise ValueError(err)
+                    except Exception as fallback_err:
+                        logger.warning(f"⚠️  Job {job.id} has no disciplines stored and could not fetch from API: {fallback_err}")
+                        job.status = "failed"
+                        job.updated_at = datetime.utcnow()
+                        job.error_details = "Queued job had no disciplines stored; could not fetch from Procore. Please delete and re-run with discipline selection."
+                        job.result_message = None
+                        db.commit()
+                        continue
+                
+                if not disciplines:
+                    logger.warning(f"⚠️  Job {job.id} has no disciplines and no project_id, cannot process")
+                    job.status = "failed"
+                    job.updated_at = datetime.utcnow()
+                    job.error_details = "Queued job has no disciplines or project. Please delete and re-run."
+                    job.result_message = None
+                    db.commit()
+                    continue
+                
+                next_batch.append({
+                    "id": job.id,
+                    "project_id": int(job.project_id) if job.project_id else None,
+                    "project_name": job.project_name,
+                    "disciplines": disciplines,
+                    "drawing_ids": None  # Can't recover this from DB, but most jobs don't use it
+                })
+            except Exception as e:
+                logger.warning(f"Could not reconstruct job {job.id} for next batch: {e}")
+                job.status = "failed"
+                job.updated_at = datetime.utcnow()
+                job.error_details = str(e)
+                job.result_message = None
+                db.commit()
+                continue
+        
+        if next_batch:
+            # Process next batch in a new thread to avoid blocking
+            import threading
+            def process_next_batch():
+                process_batch_sequence(next_batch, access_token)
+            
+            thread = threading.Thread(target=process_next_batch, daemon=True)
+            thread.start()
+            logger.info(f"🚀 Started processing next batch of {len(next_batch)} job(s) in background")
+    
     db.close()
     
     # Purge old jobs after batch processing completes
@@ -1234,28 +1382,73 @@ async def get_recent_jobs(
             "error_details": job.error_details,
             "total_drawings": job.total_drawings,
             "processed_drawings": job.processed_drawings,
-            "pdf_exists": False
+            "pdf_paths": []  # List of {path, exists} objects
         }
         
-        # Check if PDF file exists
+        # Check if PDF file(s) exist
         if job.result_message:
-            # Extract the file path (before || if there's an error message)
-            pdf_path = job.result_message.split("||")[0].strip()
-            if pdf_path:
-                # Normalize the path - ensure it's relative to project root
-                if pdf_path.startswith("output/"):
-                    # Already has output/ prefix
-                    pdf_path = pdf_path
-                elif pdf_path.startswith("/"):
-                    # Absolute path - extract just the filename
-                    pdf_path = os.path.join("output", os.path.basename(pdf_path))
+            import json
+            try:
+                # Try to parse as JSON (new format)
+                result_data = json.loads(job.result_message)
+                if isinstance(result_data, dict) and "paths" in result_data:
+                    # New format: {"paths": [...], "error": "..."}
+                    pdf_paths = result_data.get("paths", [])
+                    for pdf_path in pdf_paths:
+                        if pdf_path:
+                            # Normalize the path
+                            if pdf_path.startswith("output/"):
+                                normalized_path = pdf_path
+                            elif pdf_path.startswith("/"):
+                                normalized_path = os.path.join("output", os.path.basename(pdf_path))
+                            else:
+                                normalized_path = os.path.join("output", pdf_path)
+                            
+                            # Check if file exists
+                            pdf_exists = os.path.exists(normalized_path) and os.path.isfile(normalized_path)
+                            job_dict["pdf_paths"].append({
+                                "path": normalized_path,
+                                "exists": pdf_exists
+                            })
                 else:
-                    # Relative path without output/ - add it
-                    pdf_path = os.path.join("output", pdf_path)
-                
-                # Check if file exists
-                if os.path.exists(pdf_path) and os.path.isfile(pdf_path):
-                    job_dict["pdf_exists"] = True
+                    # Single path in JSON (backward compat)
+                    pdf_path = result_data if isinstance(result_data, str) else result_data.get("path", "")
+                    if pdf_path:
+                        if pdf_path.startswith("output/"):
+                            normalized_path = pdf_path
+                        elif pdf_path.startswith("/"):
+                            normalized_path = os.path.join("output", os.path.basename(pdf_path))
+                        else:
+                            normalized_path = os.path.join("output", pdf_path)
+                        pdf_exists = os.path.exists(normalized_path) and os.path.isfile(normalized_path)
+                        job_dict["pdf_paths"].append({
+                            "path": normalized_path,
+                            "exists": pdf_exists
+                        })
+            except (json.JSONDecodeError, ValueError, TypeError):
+                # Legacy format: "path||error" or just "path"
+                pdf_path = job.result_message.split("||")[0].strip()
+                if pdf_path:
+                    # Normalize the path
+                    if pdf_path.startswith("output/"):
+                        normalized_path = pdf_path
+                    elif pdf_path.startswith("/"):
+                        normalized_path = os.path.join("output", os.path.basename(pdf_path))
+                    else:
+                        normalized_path = os.path.join("output", pdf_path)
+                    
+                    # Check if file exists
+                    pdf_exists = os.path.exists(normalized_path) and os.path.isfile(normalized_path)
+                    job_dict["pdf_paths"].append({
+                        "path": normalized_path,
+                        "exists": pdf_exists
+                    })
+        
+        # Backward compatibility: also set pdf_exists for single-file cases
+        if len(job_dict["pdf_paths"]) == 1:
+            job_dict["pdf_exists"] = job_dict["pdf_paths"][0]["exists"]
+        elif len(job_dict["pdf_paths"]) == 0:
+            job_dict["pdf_exists"] = False
         
         jobs_list.append(job_dict)
     
@@ -1323,25 +1516,16 @@ async def delete_job(
     if not job_record:
         raise HTTPException(status_code=404, detail="Job not found")
     
-    # Optionally delete associated PDF file if it exists
+    # Optionally delete associated PDF file(s) if they exist
     if job_record.result_message:
-        pdf_path = job_record.result_message.split("||")[0].strip()
-        if pdf_path:
-            # Normalize the path
-            if pdf_path.startswith("output/"):
-                full_path = pdf_path
-            elif pdf_path.startswith("/"):
-                full_path = os.path.join("output", os.path.basename(pdf_path))
-            else:
-                full_path = os.path.join("output", pdf_path)
-            
-            # Try to delete the PDF file if it exists
-            if os.path.exists(full_path) and os.path.isfile(full_path):
+        pdf_paths = extract_pdf_paths_from_result_message(job_record.result_message)
+        for pdf_path in pdf_paths:
+            if os.path.exists(pdf_path) and os.path.isfile(pdf_path):
                 try:
-                    os.remove(full_path)
-                    logger.info(f"Deleted PDF file: {full_path}")
+                    os.remove(pdf_path)
+                    logger.info(f"Deleted PDF file: {pdf_path}")
                 except Exception as e:
-                    logger.warning(f"Could not delete PDF file {full_path}: {e}")
+                    logger.warning(f"Could not delete PDF file {pdf_path}: {e}")
     
     # Delete the job record
     db.delete(job_record)
@@ -1371,7 +1555,8 @@ async def start_job(
             id=job_id,
             status="queued",
             project_id=str(item.project_id),
-            project_name=item.project_name
+            project_name=item.project_name,
+            disciplines_json=json.dumps(item.disciplines)  # Store disciplines for queued job processing
         )
         db.add(new_job)
         batch_jobs.append({
@@ -1383,10 +1568,21 @@ async def start_job(
     
     db.commit()
     
-    # Run in background
+    # Check if any job is currently processing or uploading
+    active_jobs = db.query(Job).filter(Job.status.in_(["processing", "uploading"])).count()
+    
+    if active_jobs > 0:
+        logger.info(f"Queued {len(batch_jobs)} job(s) - {active_jobs} job(s) currently running, will process when available")
+        return {
+            "status": "queued",
+            "count": len(batch_jobs),
+            "message": f"{active_jobs} job(s) currently running. Your job(s) will start when they complete."
+        }
+    
+    # No active jobs - start processing immediately
     background_tasks.add_task(process_batch_sequence, batch_jobs, access_token)
     
-    logger.info(f"Queued {len(batch_jobs)} jobs")
+    logger.info(f"Queued {len(batch_jobs)} jobs - starting immediately")
     return {"status": "queued", "count": len(batch_jobs)}
 
 

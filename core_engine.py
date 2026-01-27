@@ -19,6 +19,10 @@ from config import settings
 
 logger = logging.getLogger(__name__)
 
+# Suppress "Future exception was never retrieved" warnings from SSL error cleanup
+# These occur when async context managers fail during retries, but retries work correctly
+logging.getLogger('asyncio').setLevel(logging.ERROR)
+
 # Optional import for memory tracking
 try:
     import psutil
@@ -339,6 +343,12 @@ class ProcoreDocManager:
             )
             logger.info("ProcoreDocManager: Created new persistent ClientSession")
 
+    async def _close_session(self):
+        """Close the persistent session. Next request will create a new one."""
+        if self.session and not self.session.closed:
+            await self.session.close()
+            self.session = None
+            logger.debug("ProcoreDocManager: Closed session")
 
     @retry(
         stop=stop_after_attempt(3),
@@ -584,11 +594,20 @@ class ProcoreDocManager:
     @retry(
         stop=stop_after_attempt(5),
         wait=wait_exponential(multiplier=2, min=5, max=60),
-        retry=retry_if_exception_type((aiohttp.ServerDisconnectedError, aiohttp.ClientError, asyncio.TimeoutError, BrokenPipeError, OSError))
+        retry=retry_if_exception_type((
+            aiohttp.ServerDisconnectedError,
+            aiohttp.ClientError,
+            asyncio.TimeoutError,
+            BrokenPipeError,
+            OSError,
+            ssl.SSLError,
+            ConnectionError,
+        ))
     )
     async def _upload_file_async(self, local_file_path: str, target_folder_id: int) -> str:
         """
         Async upload reusing the persistent session to avoid Handshake Storms.
+        On SSL/connection errors, closes session so retry uses a fresh connection.
         """
         # 1. Ensure we have a valid persistent session
         await self._ensure_session()
@@ -599,10 +618,7 @@ class ProcoreDocManager:
         file_size_mb = os.path.getsize(local_file_path) / (1024 * 1024)
         
         # 2. Calculate dynamic timeout based on file size (10s per MB, min 60s)
-        # This prevents "ReadTimeout" on slow networks while keeping it tight for small files
         custom_timeout_val = max(60, int(file_size_mb * 10))
-        
-        # sock_read is the crucial timeout here - it waits for data chunks
         req_timeout = aiohttp.ClientTimeout(total=custom_timeout_val * 2, sock_read=custom_timeout_val, connect=30)
 
         logger.info(f"          Uploading: {file_name} ({file_size_mb:.2f} MB)")
@@ -615,36 +631,33 @@ class ProcoreDocManager:
                 data.add_field('file[parent_id]', str(target_folder_id))
                 data.add_field('file[name]', file_name)
                 
-                # 3. Perform Upload using the existing persistent session
                 async with self.session.post(
-                    endpoint, 
-                    headers=self.headers, 
-                    params=params, 
+                    endpoint,
+                    headers=self.headers,
+                    params=params,
                     data=data,
-                    timeout=req_timeout # Apply the specific timeout here
+                    timeout=req_timeout,
                 ) as response:
-                    
                     if response.status not in [200, 201]:
                         text = await response.text()
-                        # If it's a temporary server error (Gateway/RateLimit), raise to trigger retry
                         if response.status in [429, 502, 503, 504]:
                             response.raise_for_status()
-                        
                         error_msg = f"Error {response.status}: {text[:200]}"
                         logger.error(f"          ✗ Upload failed: {error_msg}")
                         return error_msg
-                    
                     upload_time = time.time() - upload_start
                     logger.info(f"          ✓ Uploaded '{file_name}' in {upload_time:.2f}s")
                     return "Success"
 
-        except asyncio.TimeoutError:
-            logger.warning(f"          ⚠ Timeout uploading {file_name} - Retrying...")
-            raise # Let tenacity retry
+        except (asyncio.TimeoutError, aiohttp.ClientError, OSError, ssl.SSLError, ConnectionError) as e:
+            # Close session so retry uses a fresh connection (avoids SSL BAD_RECORD_MAC on reuse)
+            await self._close_session()
+            if isinstance(e, asyncio.TimeoutError):
+                logger.warning(f"          ⚠ Timeout uploading {file_name} - Retrying with new connection...")
+            else:
+                logger.warning(f"          ⚠ Connection/SSL error uploading {file_name}: {e!r} - Retrying with new connection...")
+            raise
         except Exception as e:
-            # Let tenacity handle connection errors, but log others
-            if isinstance(e, (aiohttp.ClientError, OSError)):
-                raise
             return f"Upload Error: {str(e)}"
 
 
@@ -674,16 +687,18 @@ class ProcoreDocManager:
         except Exception as e:
             return f"Error: {str(e)}"
 
-    async def process_file_update(self, file_path: str, target_folder_id: int, archive_folder_id: Optional[int]) -> str:
-        """Clean up existing files and upload new one."""
+    async def process_file_update(self, file_paths: List[str], target_folder_id: int, archive_folder_id: Optional[int]) -> str:
+        """Clean up existing files and upload new ones."""
         upload_start = time.time()
-        file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
+        total_size_mb = sum(os.path.getsize(fp) / (1024 * 1024) for fp in file_paths)
         logger.info(f"═══════════════════════════════════════════════════════════")
         logger.info(f"📤 STARTING PROCORE UPLOAD PROCESS")
         logger.info(f"   Target folder ID: {target_folder_id}")
         logger.info(f"   Archive folder ID: {archive_folder_id}")
-        logger.info(f"   File: {os.path.basename(file_path)}")
-        logger.info(f"   File size: {file_size_mb:.2f} MB")
+        logger.info(f"   Files to upload: {len(file_paths)}")
+        for fp in file_paths:
+            logger.info(f"     - {os.path.basename(fp)} ({os.path.getsize(fp) / (1024 * 1024):.2f} MB)")
+        logger.info(f"   Total size: {total_size_mb:.2f} MB")
         logger.info(f"═══════════════════════════════════════════════════════════")
 
         # 1. Clean Sweep: Move ALL existing files in target -> Archive
@@ -723,27 +738,37 @@ class ProcoreDocManager:
         else:
             logger.info(f"         ✓ Target folder is empty. No archiving needed (took {check_time:.2f}s)")
 
-        # 2. Upload New
-        logger.info(f"[UPLOAD STEP 2/2] Uploading new file to Procore...")
-        upload_file_start = time.time()
-        result = await self.upload_file(file_path, target_folder_id)
-        upload_file_time = time.time() - upload_file_start
+        # 2. Upload New Files
+        logger.info(f"[UPLOAD STEP 2/2] Uploading {len(file_paths)} file(s) to Procore...")
+        for idx, file_path in enumerate(file_paths, 1):
+            logger.info(f"         Uploading file {idx}/{len(file_paths)}: {os.path.basename(file_path)}...")
+            upload_file_start = time.time()
+            result = await self.upload_file(file_path, target_folder_id)
+            upload_file_time = time.time() - upload_file_start
+            
+            if result == "Success":
+                logger.info(f"         ✓ Upload successful (took {upload_file_time:.2f}s)")
+                # Use fresh connection for next file (avoids SSL BAD_RECORD_MAC on reused conn)
+                await self._close_session()
+            else:
+                logger.error(f"         ✗ Upload failed: {result}")
+                await self._close_session()
+                total_upload_time = time.time() - upload_start
+                logger.error(f"═══════════════════════════════════════════════════════════")
+                logger.error(f"❌ UPLOAD FAILED after {total_upload_time:.2f}s")
+                logger.error(f"   Error: {result}")
+                logger.error(f"   Uploaded {idx - 1}/{len(file_paths)} files successfully")
+                logger.error(f"═══════════════════════════════════════════════════════════")
+                return result
         
         total_upload_time = time.time() - upload_start
-        if result == "Success":
-            logger.info(f"         ✓ Upload successful (took {upload_file_time:.2f}s)")
-            logger.info(f"═══════════════════════════════════════════════════════════")
-            logger.info(f"✅ UPLOAD COMPLETED SUCCESSFULLY")
-            logger.info(f"   Total time: {total_upload_time:.2f}s")
-            logger.info(f"═══════════════════════════════════════════════════════════")
-        else:
-            logger.error(f"         ✗ Upload failed: {result}")
-            logger.error(f"═══════════════════════════════════════════════════════════")
-            logger.error(f"❌ UPLOAD FAILED after {total_upload_time:.2f}s")
-            logger.error(f"   Error: {result}")
-            logger.error(f"═══════════════════════════════════════════════════════════")
+        logger.info(f"═══════════════════════════════════════════════════════════")
+        logger.info(f"✅ UPLOAD COMPLETED SUCCESSFULLY")
+        logger.info(f"   Total time: {total_upload_time:.2f}s")
+        logger.info(f"   Uploaded {len(file_paths)} file(s)")
+        logger.info(f"═══════════════════════════════════════════════════════════")
         
-        return result
+        return "Success"
 
     async def _create_archive_folder(self, parent_folder_id: int) -> Optional[int]:
         """Create Archive subfolder."""
@@ -1096,8 +1121,8 @@ async def get_target_combined_folder(project_id: int, access_token: str) -> tupl
         await client.close()
 
 
-async def handle_procore_upload(project_id: int, local_filepath: str, access_token: str) -> str:
-    """Upload file to Procore with archiving."""
+async def handle_procore_upload(project_id: int, local_file_paths: List[str], access_token: str) -> str:
+    """Upload files to Procore with archiving."""
     logger.info("--- STARTING PROCORE UPLOAD SEQUENCE ---")
     target_id, archive_id = await get_target_combined_folder(project_id, access_token)
     
@@ -1106,7 +1131,7 @@ async def handle_procore_upload(project_id: int, local_filepath: str, access_tok
     
     manager = ProcoreDocManager(settings.PROCORE_COMPANY_ID, project_id, access_token)
     try:
-        result = await manager.process_file_update(local_filepath, target_id, archive_id)
+        result = await manager.process_file_update(local_file_paths, target_id, archive_id)
         return result
     finally:
         await manager.close()
@@ -1164,43 +1189,77 @@ async def download_and_process_drawing(
             "page_size": 200
         }
         
-        try:
-            markup_start = time.time()
-            markup_data = await client.get("/rest/v1.0/markup_layers", params=m_params)
-            markup_time = time.time() - markup_start
-            
-            # Extract layer IDs
-            layer_ids = []
-            if markup_data and len(markup_data) > 0:
-                for layer in markup_data:
-                    if 'id' in layer:
-                        layer_ids.append(layer['id'])
-                
-                logger.info(f"         Found {len(layer_ids)} markup layers (took {markup_time:.2f}s)")
-                logger.debug(f"         Layer IDs: {layer_ids}")
-            else:
-                logger.info(f"         No markup layers found for {d_num}")
-            
-            # Request pre-rendered PDF from Procore
-            pdf_url = await client.generate_pdf_with_markups(project_id, revision_id, layer_ids)
-            
-            # Download the pre-rendered PDF
-            logger.debug(f"         Downloading pre-rendered PDF for {d_num}...")
-            download_start = time.time()
-            success = await client.download_file(pdf_url, filename)
-            download_time = time.time() - download_start
-            
-            if not success:
-                logger.error(f"         ✗ Download failed for {d_num}")
-                return None
-            
-            file_size = os.path.getsize(filename) / 1024  # KB
-            logger.info(f"         ✓ Downloaded {d_num} with markups ({file_size:.1f} KB, took {download_time:.2f}s)")
-            
-        except Exception as e:
-            logger.error(f"         ✗ Failed to get pre-rendered PDF for {d_num}: {type(e).__name__}: {str(e)}")
-            raise  # Re-raise to fail the job as per requirements
-        
+        max_attempts = max(1, getattr(settings, "DRAWING_DOWNLOAD_RETRIES", 3))
+        last_error = None
+        download_ok = False
+
+        for attempt in range(1, max_attempts + 1):
+            try:
+                if attempt > 1:
+                    logger.info(f"         ↩ Retry {attempt}/{max_attempts} for {d_num}...")
+                    if os.path.exists(filename):
+                        try:
+                            os.remove(filename)
+                        except OSError:
+                            pass
+
+                markup_start = time.time()
+                markup_data = await client.get("/rest/v1.0/markup_layers", params=m_params)
+                markup_time = time.time() - markup_start
+
+                layer_ids = []
+                if markup_data and len(markup_data) > 0:
+                    for layer in markup_data:
+                        if 'id' in layer:
+                            layer_ids.append(layer['id'])
+                    logger.info(f"         Found {len(layer_ids)} markup layers (took {markup_time:.2f}s)")
+                    logger.debug(f"         Layer IDs: {layer_ids}")
+                else:
+                    logger.info(f"         No markup layers found for {d_num}")
+
+                pdf_url = await client.generate_pdf_with_markups(project_id, revision_id, layer_ids)
+
+                logger.debug(f"         Downloading pre-rendered PDF for {d_num}...")
+                download_start = time.time()
+                success = await client.download_file(pdf_url, filename)
+                download_time = time.time() - download_start
+
+                if not success:
+                    last_error = "Download failed"
+                    if os.path.exists(filename):
+                        try:
+                            os.remove(filename)
+                        except OSError:
+                            pass
+                    if attempt < max_attempts:
+                        logger.warning(f"         ✗ Download failed for {d_num} (attempt {attempt}/{max_attempts}), retrying...")
+                        await asyncio.sleep(2 ** attempt)
+                        continue
+                    logger.error(f"         ✗ Download failed for {d_num} after {max_attempts} attempt(s)")
+                    break
+
+                file_size = os.path.getsize(filename) / 1024
+                logger.info(f"         ✓ Downloaded {d_num} with markups ({file_size:.1f} KB, took {download_time:.2f}s)")
+                download_ok = True
+                break
+
+            except Exception as e:
+                last_error = e
+                if os.path.exists(filename):
+                    try:
+                        os.remove(filename)
+                    except OSError:
+                        pass
+                if attempt < max_attempts:
+                    logger.warning(f"         ✗ Failed for {d_num} (attempt {attempt}/{max_attempts}): {type(e).__name__}: {str(e)} — retrying...")
+                    await asyncio.sleep(2 ** attempt)
+                    continue
+                logger.error(f"         ✗ Failed to get pre-rendered PDF for {d_num} after {max_attempts} attempt(s): {type(e).__name__}: {str(e)}")
+                raise
+
+        if not download_ok:
+            return None
+
         total_time = time.time() - start_time
         logger.info(f"         ✓ Completed {d_num} in {total_time:.2f}s")
         logger.info(f"═══════════════════════════════════════════════════════════")
@@ -1490,36 +1549,74 @@ async def run_job_async(
 
         # STEP 7: Merging phase
         step_start = time.time()
-        logger.info(f"[MERGE] Merging {len(files_to_merge)} PDFs into final document...")
+        logger.info(f"[MERGE] Generating PDFs...")
         if progress_callback:
             progress_callback(92, total_files, total_files)  # All drawings processed
 
-        # Merge PDFs (CPU-intensive, run in thread)
-        log_memory("[Before Merge]")
+        # Group files by discipline for per-division PDFs
+        discipline_groups = {}
+        for item in files_to_merge:
+            disc = item.get('discipline', 'Unknown')
+            if disc not in discipline_groups:
+                discipline_groups[disc] = []
+            discipline_groups[disc].append(item)
+        
+        # STEP 7a: Generate per-division PDFs
+        division_paths = []
+        log_memory("[Before Division Merges]")
+        logger.info(f"[MERGE STEP 1/2] Generating {len(discipline_groups)} division-specific PDF(s)...")
+        
+        for discipline, items in sorted(discipline_groups.items()):
+            if not items:  # Skip empty groups
+                continue
+            
+            sanitized_disc = sanitize_discipline_filename(discipline)
+            division_filename = f"{sanitized_disc}.pdf"
+            division_path = os.path.abspath(os.path.join("output", division_filename))
+            
+            # Merge this discipline's drawings
+            page_count = await asyncio.to_thread(
+                merge_pdf_group,
+                items,
+                division_path
+            )
+            division_paths.append(division_path)
+            logger.info(f"         ✓ Created division PDF: {division_filename} ({page_count} pages)")
+        
+        log_memory("[After Division Merges]")
+        logger.info(f"         ✓ Generated {len(division_paths)} division PDF(s)")
+        
+        # STEP 7b: Generate combined PDF
+        logger.info(f"[MERGE STEP 2/2] Generating combined PDF...")
+        log_memory("[Before Combined Merge]")
         final_output_path, actual_page_count = await asyncio.to_thread(
             merge_pdfs,
             files_to_merge,
             project_name,
             temp_dir
         )
-        log_memory("[After Merge Complete]")
+        log_memory("[After Combined Merge Complete]")
         
-        # STEP 8: Validate PDF page count
+        # STEP 8: Validate combined PDF page count
         expected_pages = len(files_to_merge)
-        logger.info(f"[VALIDATION] Verifying PDF integrity...")
+        logger.info(f"[VALIDATION] Verifying combined PDF integrity...")
         logger.info(f"         Expected pages: {expected_pages} (one per drawing)")
         logger.info(f"         Actual pages in PDF: {actual_page_count}")
         
         if actual_page_count != expected_pages:
             error_msg = f"PDF validation failed: Expected {expected_pages} pages but PDF has {actual_page_count} pages. The merge process may have failed or some drawings were corrupted."
             logger.error(f"         ✗ {error_msg}")
-            # Clean up the invalid PDF
+            # Clean up all generated PDFs
             try:
                 if os.path.exists(final_output_path):
                     os.remove(final_output_path)
-                    logger.info(f"         Removed invalid PDF: {final_output_path}")
+                    logger.info(f"         Removed invalid combined PDF: {final_output_path}")
+                for div_path in division_paths:
+                    if os.path.exists(div_path):
+                        os.remove(div_path)
+                        logger.info(f"         Removed division PDF: {div_path}")
             except Exception as e:
-                logger.warning(f"         Could not remove invalid PDF: {e}")
+                logger.warning(f"         Could not remove invalid PDFs: {e}")
             raise Exception(error_msg)
         
         logger.info(f"         ✓ PDF validation passed: {actual_page_count} pages match expected {expected_pages} pages")
@@ -1531,17 +1628,23 @@ async def run_job_async(
         peak_ram = memory_tracker.stop()
         current_ram = memory_tracker.get_current()
         
-        logger.info(f"         ✓ Merge complete: {os.path.basename(final_output_path)} (took {merge_time:.2f}s)")
+        # Build list of all output paths (combined first, then divisions)
+        all_output_paths = [final_output_path] + division_paths
+        
+        logger.info(f"         ✓ Merge complete: {len(all_output_paths)} PDF(s) generated (took {merge_time:.2f}s)")
         logger.info(f"═══════════════════════════════════════════════════════════")
         logger.info(f"✅ JOB COMPLETED SUCCESSFULLY")
-        logger.info(f"   Output: {final_output_path}")
+        logger.info(f"   Output files:")
+        logger.info(f"     - Combined: {os.path.basename(final_output_path)}")
+        for div_path in division_paths:
+            logger.info(f"     - Division: {os.path.basename(div_path)}")
         logger.info(f"   Total time: {total_time:.2f}s ({total_time/60:.1f} minutes)")
         logger.info(f"   Processed: {len(files_to_merge)}/{total_files} drawings")
         logger.info(f"   Pages: {actual_page_count} (verified)")
         logger.info(f"   📊 RAM Usage: Peak {peak_ram:.1f} MB / 2048 MB ({peak_ram/2048*100:.1f}%) | Final {current_ram:.1f} MB")
         logger.info(f"═══════════════════════════════════════════════════════════")
 
-        return final_output_path
+        return all_output_paths
 
     except Exception as e:
         total_time = time.time() - start_time
@@ -1617,6 +1720,50 @@ def cleanup_old_pdfs_per_project():
 
 
 
+def sanitize_discipline_filename(name: str) -> str:
+    """
+    Sanitize discipline name for use in filenames.
+    Replaces invalid path characters with underscores, preserves spaces and hyphens.
+    """
+    # Replace invalid path characters: \ / : * ? " < > |
+    sanitized = re.sub(r'[<>:"/\\|?*]', '_', name)
+    # Collapse multiple underscores
+    sanitized = re.sub(r'_+', '_', sanitized)
+    # Strip leading/trailing underscores and whitespace
+    sanitized = sanitized.strip('_').strip()
+    return sanitized
+
+
+def merge_pdf_group(items: List[Dict], output_path: str) -> int:
+    """
+    Merge a subset of files_to_merge items into a single PDF.
+    No batching, no TOC, no source deletion - just a simple merge.
+    
+    Args:
+        items: List of dicts with 'path', 'title', 'discipline' keys
+        output_path: Full path where merged PDF should be saved
+    
+    Returns:
+        Page count of the merged PDF
+    """
+    logger.info(f"          Merging {len(items)} drawings into {os.path.basename(output_path)}...")
+    
+    with pymupdf.open() as merged_doc:
+        for item in items:
+            try:
+                with pymupdf.open(item['path']) as src_doc:
+                    merged_doc.insert_pdf(src_doc)
+            except Exception as e:
+                logger.warning(f"          ⚠ Skipping corrupt file {item.get('title')}: {e}")
+        
+        # Save merged PDF
+        merged_doc.save(output_path, garbage=0, deflate=False)
+        page_count = len(merged_doc)
+    
+    logger.info(f"          ✓ Created {os.path.basename(output_path)} ({page_count} pages)")
+    return page_count
+
+
 def merge_pdfs(files_to_merge: List[Dict], project_name: str, temp_dir: str) -> tuple[str, int]:
     """
     Standard Tier Merge: Optimized for 2GB RAM.
@@ -1631,7 +1778,7 @@ def merge_pdfs(files_to_merge: List[Dict], project_name: str, temp_dir: str) -> 
     # 1. Setup paths (cleanup moved to after successful generation)
     clean_proj = re.sub(r'[^a-zA-Z0-9]', '_', project_name)
     final_filename = f"{clean_proj}_Merged.pdf"
-    final_output_path = os.path.join("output", final_filename)
+    final_output_path = os.path.abspath(os.path.join("output", final_filename))
     
     # 2. Setup Batches - use configurable batch size (default 15 for low memory)
     BATCH_SIZE = settings.MERGE_BATCH_SIZE
@@ -1859,8 +2006,8 @@ def run_job_api(
     access_token: str,
     progress_callback: Optional[Callable[[int, int, int], None]] = None,  # (percent, processed, total)
     drawing_ids: Optional[List[int]] = None  # Optional: specific drawing IDs to process
-) -> str:
-    """Synchronous wrapper for async job runner."""
+) -> List[str]:
+    """Synchronous wrapper for async job runner. Returns list of PDF paths (combined first, then divisions)."""
     return asyncio.run(run_job_async(project_id, target_disciplines, access_token, progress_callback, drawing_ids))
 
 
