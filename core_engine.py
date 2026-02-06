@@ -1033,8 +1033,8 @@ class AsyncProcoreClient:
             logger.error(f"API POST failed: {endpoint} - {str(e)}")
             raise
     
-    async def generate_pdf_with_markups(self, project_id: int, revision_id: int, layer_ids: List[int]) -> str:
-        """Generate and download a PDF with markups."""
+    async def generate_pdf_with_markups(self, project_id: int, revision_id: int, layer_ids: List[int]) -> Optional[str]:
+        """Generate and download a PDF with markups. Returns download URL string or None if missing/invalid."""
         endpoint = f"/rest/v1.0/projects/{project_id}/drawing_revisions/{revision_id}/pdf_download_pages"
         payload = {
             "pdf_download_page": {
@@ -1046,10 +1046,30 @@ class AsyncProcoreClient:
         
         logger.info(f"          Requesting PDF (rev {revision_id})...")
         response_data = await self.post(endpoint, json=payload)
-        return response_data.get('url')
+        if not isinstance(response_data, dict):
+            logger.debug(f"PDF response is not a dict: type={type(response_data).__name__}")
+            return None
+        # Top-level url
+        url_val = response_data.get('url')
+        if url_val is None:
+            # Nested under pdf_download_page
+            pdf_page = response_data.get('pdf_download_page') or response_data.get('pdf_download_pages')
+            if isinstance(pdf_page, dict):
+                url_val = pdf_page.get('url') or pdf_page.get('href')
+        if isinstance(url_val, dict):
+            url_val = url_val.get('url') or url_val.get('href')
+        if isinstance(url_val, str) and url_val.strip():
+            return url_val.strip()
+        logger.debug(
+            f"No valid URL in PDF response: keys={list(response_data.keys())}, url_val type={type(url_val).__name__}"
+        )
+        return None
     
     async def download_file(self, url: str, destination: str) -> bool:
         """Download file using the persistent session."""
+        if not url or not isinstance(url, str) or not url.strip():
+            logger.warning("          Download skipped: invalid or missing URL")
+            return False
         await self._ensure_session()
         
         try:
@@ -1218,6 +1238,16 @@ async def download_and_process_drawing(
                     logger.info(f"         No markup layers found for {d_num}")
 
                 pdf_url = await client.generate_pdf_with_markups(project_id, revision_id, layer_ids)
+
+                if not pdf_url:
+                    logger.warning(f"         PDF URL missing for {d_num}, skipping download")
+                    last_error = "PDF URL missing"
+                    if attempt < max_attempts:
+                        logger.warning(f"         ✗ Download failed for {d_num} (attempt {attempt}/{max_attempts}), retrying...")
+                        await asyncio.sleep(2 ** attempt)
+                        continue
+                    logger.error(f"         ✗ Download failed for {d_num} after {max_attempts} attempt(s)")
+                    break
 
                 logger.debug(f"         Downloading pre-rendered PDF for {d_num}...")
                 download_start = time.time()

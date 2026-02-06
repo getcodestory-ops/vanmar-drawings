@@ -4,8 +4,8 @@ import time
 import asyncio
 import json
 import base64
-from datetime import datetime
-from typing import List, Optional, Dict, Any
+from datetime import datetime, timedelta
+from typing import List, Optional, Dict, Any, Tuple
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, BackgroundTasks, Depends, Cookie, HTTPException, status
@@ -13,7 +13,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, validator
-from sqlalchemy import create_engine, Column, String, DateTime, Integer, Text, Boolean, text
+from sqlalchemy import create_engine, Column, String, DateTime, Integer, Text, Boolean, text, ForeignKey
 from sqlalchemy.orm import sessionmaker, declarative_base, Session
 from cryptography.fernet import Fernet
 from slowapi import Limiter, _rate_limit_exceeded_handler
@@ -68,6 +68,27 @@ job_cancellation_events: Dict[str, asyncio.Event] = {}
 # DATABASE MODELS
 # ---------------------------------------------------------
 
+class User(Base):
+    __tablename__ = "users"
+    id = Column(String, primary_key=True, index=True)
+    procore_user_id = Column(String, unique=True, index=True)
+    email = Column(String, unique=True, index=True)
+    name = Column(String)
+    is_admin = Column(Boolean, default=False)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    last_login = Column(DateTime, nullable=True)
+
+
+class Session(Base):
+    __tablename__ = "sessions"
+    id = Column(String, primary_key=True, index=True)
+    user_id = Column(String, ForeignKey("users.id"), index=True)
+    access_token = Column(Text)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    expires_at = Column(DateTime)
+
+
 class Job(Base):
     __tablename__ = "jobs"
     id = Column(String, primary_key=True, index=True)
@@ -82,11 +103,14 @@ class Job(Base):
     total_drawings = Column(Integer, nullable=True)  # Total drawings to process
     processed_drawings = Column(Integer, default=0)  # Drawings processed so far
     disciplines_json = Column(String, nullable=True)  # JSON array of discipline names for queued job processing
+    user_id = Column(String, ForeignKey("users.id"), index=True, nullable=True)
+    created_by_name = Column(String, nullable=True)
 
 
 class TokenStore(Base):
     __tablename__ = "token_store"
     id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(String, ForeignKey("users.id"), unique=True, index=True, nullable=True)
     refresh_token_encrypted = Column(Text)  # Encrypted
     updated_at = Column(DateTime, default=datetime.utcnow)
 
@@ -103,6 +127,8 @@ class ScheduledJob(Base):
     timezone = Column(String)
     active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+    user_id = Column(String, ForeignKey("users.id"), index=True, nullable=True)
+    created_by_name = Column(String, nullable=True)
 
 
 # Tables will be created on startup via lifespan function
@@ -153,6 +179,7 @@ class ScheduleRequest(BaseModel):
     day: str
     time: str
     timezone: str
+    as_user_id: Optional[str] = None  # Admin only: schedule runs with this user's token
 
     @validator('day')
     def validate_day(cls, v):
@@ -446,43 +473,105 @@ def purge_old_jobs(keep_count: int = 25):
 # AUTH FUNCTIONS
 # ---------------------------------------------------------
 
+def _refresh_user_access_token(user_id: str, db: Session) -> Optional[Tuple[str, int]]:
+    """Refresh access token for a user. Returns (access_token, expires_in_seconds) or None."""
+    token_entry = db.query(TokenStore).filter(TokenStore.user_id == user_id).first()
+    if not token_entry or not token_entry.refresh_token_encrypted:
+        logger.error(f"No refresh token found for user {user_id}")
+        return None
+    refresh_token = decrypt_token(token_entry.refresh_token_encrypted)
+    payload = {
+        "grant_type": "refresh_token",
+        "refresh_token": refresh_token,
+        "client_id": settings.PROCORE_CLIENT_ID,
+        "client_secret": settings.PROCORE_CLIENT_SECRET,
+        "redirect_uri": settings.redirect_uri
+    }
+    try:
+        r = requests.post(settings.token_url, data=payload, timeout=30)
+        r.raise_for_status()
+        tokens = r.json()
+        new_refresh = tokens.get("refresh_token")
+        if new_refresh:
+            token_entry.refresh_token_encrypted = encrypt_token(new_refresh)
+        token_entry.updated_at = datetime.utcnow()
+        db.commit()
+        expires_in = int(tokens.get("expires_in", 7200))
+        return (tokens["access_token"], expires_in)
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Token refresh failed for user {user_id}: {e}")
+        return None
+
+
+def get_fresh_access_token_for_user(user_id: str, db: Session) -> Optional[str]:
+    """Get a fresh access token for a specific user (for scheduler)."""
+    result = _refresh_user_access_token(user_id, db)
+    return result[0] if result else None
+
+
 def get_fresh_access_token() -> Optional[str]:
-    """Get a fresh access token using refresh token."""
+    """Get a fresh access token using first available user token (backward compat / migration)."""
     db = SessionLocal()
     try:
-        token_entry = db.query(TokenStore).first()
+        token_entry = db.query(TokenStore).filter(TokenStore.user_id.isnot(None)).first()
         if not token_entry or not token_entry.refresh_token_encrypted:
-            logger.error("No refresh token found in database")
             return None
-
-        refresh_token = decrypt_token(token_entry.refresh_token_encrypted)
-        
-        payload = {
-            "grant_type": "refresh_token",
-            "refresh_token": refresh_token,
-            "client_id": settings.PROCORE_CLIENT_ID,
-            "client_secret": settings.PROCORE_CLIENT_SECRET,
-            "redirect_uri": settings.redirect_uri
-        }
-        
-        try:
-            r = requests.post(settings.token_url, data=payload, timeout=30)
-            r.raise_for_status()
-            tokens = r.json()
-            
-            # Update refresh token
-            new_refresh = tokens['refresh_token']
-            token_entry.refresh_token_encrypted = encrypt_token(new_refresh)
-            token_entry.updated_at = datetime.utcnow()
-            db.commit()
-            
-            logger.info("Successfully refreshed access token")
-            return tokens['access_token']
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Token refresh failed: {e}")
-            return None
+        result = _refresh_user_access_token(token_entry.user_id, db)
+        return result[0] if result else None
     finally:
         db.close()
+
+
+async def get_current_user(
+    session_id: Optional[str] = Cookie(None),
+    db: Session = Depends(get_db)
+) -> Optional[User]:
+    """Get current user from session cookie. Refreshes session access token if expired."""
+    if not session_id:
+        return None
+    session = db.query(Session).filter(Session.id == session_id).first()
+    if not session:
+        return None
+    now = datetime.utcnow()
+    if session.expires_at and now >= session.expires_at:
+        result = _refresh_user_access_token(session.user_id, db)
+        if result:
+            access_token, expires_in = result
+            session.access_token = access_token
+            session.expires_at = now + timedelta(seconds=expires_in)
+            db.commit()
+        else:
+            return None
+    user = db.query(User).filter(User.id == session.user_id).first()
+    if not user or not user.is_active:
+        return None
+    return user
+
+
+def require_user(current_user: Optional[User] = Depends(get_current_user)) -> User:
+    """Require authenticated user. Raises 401 if not logged in or inactive."""
+    if not current_user or not current_user.is_active:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    return current_user
+
+
+def get_access_token_from_session(
+    session_id: Optional[str] = Cookie(None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_user)
+) -> str:
+    """Get Procore access token for current request (session already refreshed in get_current_user)."""
+    session = db.query(Session).filter(Session.id == session_id).first()
+    if not session or session.user_id != current_user.id:
+        raise HTTPException(status_code=401, detail="Session invalid")
+    return session.access_token
+
+
+def require_admin(current_user: User = Depends(require_user)) -> User:
+    """Require admin user. Raises 403 if not admin."""
+    if not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return current_user
 
 
 # ---------------------------------------------------------
@@ -814,7 +903,7 @@ def process_batch_sequence(job_list: List[dict], access_token: str):
 # ---------------------------------------------------------
 
 def scheduler_tick():
-    """Check and run scheduled jobs."""
+    """Check and run scheduled jobs. Groups by user and uses each user's token."""
     db = SessionLocal()
     try:
         active_jobs = db.query(ScheduledJob).filter(ScheduledJob.active == True).all()
@@ -823,58 +912,61 @@ def scheduler_tick():
             logger.debug(f"Scheduler tick: Checking {len(active_jobs)} active schedule(s)")
         
         jobs_to_run = []
-        
         for s_job in active_jobs:
             try:
                 user_tz = pytz.timezone(s_job.timezone)
                 now_in_user_tz = datetime.now(user_tz)
                 current_day = now_in_user_tz.strftime("%a")
-                
                 logger.debug(f"  Schedule '{s_job.project_name}': "
                            f"Now={current_day} {now_in_user_tz.hour:02d}:{now_in_user_tz.minute:02d}, "
                            f"Target={s_job.day_of_week} {s_job.hour:02d}:{s_job.minute:02d}")
-                
                 if (current_day == s_job.day_of_week and
                     now_in_user_tz.hour == s_job.hour and
                     now_in_user_tz.minute == s_job.minute):
-                    
-                    logger.info(f"✅ Triggering scheduled job: {s_job.project_name} (Timezone: {s_job.timezone})")
+                    logger.info(f"Triggering scheduled job: {s_job.project_name} (Timezone: {s_job.timezone})")
                     jobs_to_run.append(s_job)
-                    
             except Exception as e:
                 logger.error(f"Error checking schedule for {s_job.project_name}: {e}")
 
         if not jobs_to_run:
             return
 
-        # Get fresh access token
-        access_token = get_fresh_access_token()
-        if not access_token:
-            logger.error("Could not get access token for scheduled jobs")
-            return
-
-        # Create job entries
-        batch_jobs = []
+        # Group by user_id (None = legacy, use first available token)
+        jobs_by_user: Dict[Optional[str], list] = {}
         for s_job in jobs_to_run:
-            job_id = str(uuid.uuid4())
-            new_job = Job(
-                id=job_id,
-                status="queued",
-                project_id=s_job.project_id,
-                project_name=f"[AUTO] {s_job.project_name}"
-            )
-            db.add(new_job)
-            discs = json.loads(s_job.disciplines_json)
-            batch_jobs.append({
-                "id": job_id,
-                "project_id": int(s_job.project_id),
-                "disciplines": discs
-            })
+            uid = getattr(s_job, "user_id", None)
+            if uid not in jobs_by_user:
+                jobs_by_user[uid] = []
+            jobs_by_user[uid].append(s_job)
 
-        db.commit()
-        
-        # Run jobs
-        process_batch_sequence(batch_jobs, access_token)
+        for user_id, user_scheduled_jobs in jobs_by_user.items():
+            if user_id:
+                access_token = get_fresh_access_token_for_user(user_id, db)
+            else:
+                access_token = get_fresh_access_token()
+            if not access_token:
+                logger.error("Could not get access token for scheduled jobs (user_id=%s)", user_id)
+                continue
+            batch_jobs = []
+            for s_job in user_scheduled_jobs:
+                job_id = str(uuid.uuid4())
+                new_job = Job(
+                    id=job_id,
+                    status="queued",
+                    project_id=s_job.project_id,
+                    project_name=f"[AUTO] {s_job.project_name}",
+                    user_id=getattr(s_job, "user_id", None),
+                    created_by_name=getattr(s_job, "created_by_name", None)
+                )
+                db.add(new_job)
+                discs = json.loads(s_job.disciplines_json)
+                batch_jobs.append({
+                    "id": job_id,
+                    "project_id": int(s_job.project_id),
+                    "disciplines": discs
+                })
+            db.commit()
+            process_batch_sequence(batch_jobs, access_token)
         
     except Exception as e:
         logger.error(f"Scheduler tick error: {e}", exc_info=True)
@@ -892,22 +984,36 @@ scheduler.add_job(scheduler_tick, 'interval', seconds=60)
 # ---------------------------------------------------------
 
 @app.get("/", response_class=HTMLResponse)
-async def home(request: Request, access_token: str = Cookie(None)):
+async def home(request: Request, current_user: Optional[User] = Depends(get_current_user)):
     """Home page - dashboard or login."""
-    if not access_token:
+    if not current_user:
         return templates.TemplateResponse("login.html", {"request": request})
-    return templates.TemplateResponse("dashboard.html", {"request": request})
+    return templates.TemplateResponse("dashboard.html", {"request": request, "user": current_user})
 
 
 @app.get("/login")
 async def login():
     """Redirect to Procore OAuth login."""
     from urllib.parse import quote_plus
-    # URL encode the redirect_uri to ensure proper encoding
     redirect_uri_encoded = quote_plus(settings.redirect_uri)
     url = f"{settings.login_url}?response_type=code&client_id={settings.PROCORE_CLIENT_ID}&redirect_uri={redirect_uri_encoded}"
     logger.info(f"Redirecting to Procore OAuth. Redirect URI (raw): {settings.redirect_uri}")
     return RedirectResponse(url)
+
+
+@app.get("/logout")
+async def logout(
+    session_id: Optional[str] = Cookie(None),
+    db: Session = Depends(get_db)
+):
+    """Log out: delete session and clear cookie."""
+    if session_id:
+        db.query(Session).filter(Session.id == session_id).delete()
+        db.commit()
+    response = RedirectResponse(url="/")
+    response.delete_cookie("session_id")
+    response.delete_cookie("access_token")  # legacy
+    return response
 
 
 @app.get("/callback")
@@ -1021,6 +1127,8 @@ async def callback(request: Request, code: Optional[str] = None, error: Optional
             )
         
         tokens = r.json()
+        access_token = tokens["access_token"]
+        expires_in = int(tokens.get("expires_in", 7200))
         
         # Validate SECRET_KEY before encrypting
         try:
@@ -1042,21 +1150,88 @@ async def callback(request: Request, code: Optional[str] = None, error: Optional
                 status_code=500
             )
         
-        # Store encrypted refresh token
+        # Fetch Procore user info (company_id required for name field)
+        try:
+            me_resp = requests.get(
+                f"{settings.PROCORE_BASE_URL}/rest/v1.0/me",
+                headers={"Authorization": f"Bearer {access_token}"},
+                params={"company_id": settings.PROCORE_COMPANY_ID},
+                timeout=15
+            )
+            me_resp.raise_for_status()
+            me_data = me_resp.json()
+        except Exception as me_err:
+            logger.error(f"Failed to fetch Procore user info: {me_err}", exc_info=True)
+            return HTMLResponse(
+                """
+                <html>
+                    <body style="font-family: Arial; padding: 40px; max-width: 600px; margin: 0 auto;">
+                        <h1>❌ Login Failed</h1>
+                        <p>Could not retrieve your Procore profile.</p>
+                        <p><a href="/login">Try Again</a> | <a href="/">Home</a></p>
+                    </body>
+                </html>
+                """,
+                status_code=500
+            )
+        
+        procore_user_id = str(me_data.get("id", ""))
+        email = me_data.get("login") or me_data.get("email") or ""
+        name = me_data.get("name") or email or "User"
+        if not procore_user_id or not email:
+            logger.error("Procore /me missing id or login")
+            return HTMLResponse(
+                """
+                <html>
+                    <body style="font-family: Arial; padding: 40px; max-width: 600px; margin: 0 auto;">
+                        <h1>❌ Login Failed</h1>
+                        <p>Invalid Procore profile (missing id or email).</p>
+                        <p><a href="/login">Try Again</a> | <a href="/">Home</a></p>
+                    </body>
+                </html>
+                """,
+                status_code=400
+            )
+        
+        # Create or update User
+        user = db.query(User).filter(User.procore_user_id == procore_user_id).first()
+        if not user:
+            # Only roberto@flowlly.com is admin
+            default_admin_email = "roberto@flowlly.com"
+            user = User(
+                id=str(uuid.uuid4()),
+                procore_user_id=procore_user_id,
+                email=email,
+                name=name,
+                is_admin=(email.lower() == default_admin_email)
+            )
+            db.add(user)
+            db.flush()
+        else:
+            user.email = email
+            user.name = name
+            # Ensure roberto@flowlly.com is always admin
+            if email.lower() == "roberto@flowlly.com":
+                user.is_admin = True
+        user.last_login = datetime.utcnow()
+        db.flush()
+        
+        # Store encrypted refresh token for this user
         ref = tokens.get("refresh_token")
         if ref:
             try:
                 encrypted_ref = encrypt_token(ref)
-                existing = db.query(TokenStore).first()
-                if existing:
-                    existing.refresh_token_encrypted = encrypted_ref
-                    existing.updated_at = datetime.utcnow()
+                token_entry = db.query(TokenStore).filter(TokenStore.user_id == user.id).first()
+                if token_entry:
+                    token_entry.refresh_token_encrypted = encrypted_ref
+                    token_entry.updated_at = datetime.utcnow()
                 else:
-                    db.add(TokenStore(refresh_token_encrypted=encrypted_ref))
+                    db.add(TokenStore(user_id=user.id, refresh_token_encrypted=encrypted_ref))
                 db.commit()
-                logger.info("OAuth tokens stored successfully")
+                logger.info("OAuth tokens stored successfully for user %s", user.email)
             except Exception as enc_error:
                 logger.error(f"Failed to encrypt/store token: {enc_error}", exc_info=True)
+                db.rollback()
                 return HTMLResponse(
                     f"""
                     <html>
@@ -1064,22 +1239,32 @@ async def callback(request: Request, code: Optional[str] = None, error: Optional
                             <h1>❌ Token Storage Failed</h1>
                             <p>Failed to store authentication token.</p>
                             <p><strong>Error:</strong> {str(enc_error)}</p>
-                            <p>Check server logs for details.</p>
                             <p><a href="/login">Try Again</a></p>
                         </body>
                     </html>
                     """,
                     status_code=500
                 )
+        
+        # Create session
+        session_id = str(uuid.uuid4())
+        expires_at = datetime.utcnow() + timedelta(seconds=expires_in)
+        db.add(Session(
+            id=session_id,
+            user_id=user.id,
+            access_token=access_token,
+            expires_at=expires_at
+        ))
+        db.commit()
 
         response = RedirectResponse(url="/")
         response.set_cookie(
-            key="access_token",
-            value=tokens["access_token"],
+            key="session_id",
+            value=session_id,
             httponly=True,
             secure=settings.is_production,
             samesite="lax",
-            max_age=3600  # 1 hour
+            max_age=getattr(settings, "SESSION_TTL", 86400)
         )
         return response
         
@@ -1117,17 +1302,27 @@ async def callback(request: Request, code: Optional[str] = None, error: Optional
         )
 
 
+@app.get("/api/me")
+async def get_me(current_user: User = Depends(require_user)):
+    """Get current user info for dashboard."""
+    return {
+        "id": current_user.id,
+        "email": current_user.email,
+        "name": current_user.name,
+        "is_admin": current_user.is_admin,
+    }
+
+
 @app.get("/api/projects")
 @limiter.limit("30/minute")
-async def get_projects(request: Request, access_token: str = Cookie(None)):
-    """Get list of Procore projects."""
-    if not access_token:
-        raise HTTPException(status_code=401, detail="Not authenticated")
-    
+async def get_projects(
+    request: Request,
+    current_user: User = Depends(require_user),
+    access_token: str = Depends(get_access_token_from_session)
+):
+    """Get list of Procore projects for current user."""
     try:
-        # Use async version directly instead of sync wrapper
         from core_engine import AsyncProcoreClient
-        from config import settings
         
         client = AsyncProcoreClient(access_token, settings.PROCORE_COMPANY_ID)
         try:
@@ -1185,15 +1380,15 @@ async def get_projects(request: Request, access_token: str = Cookie(None)):
 
 @app.get("/api/disciplines")
 @limiter.limit("30/minute")
-async def get_disciplines(request: Request, project_id: int, access_token: str = Cookie(None)):
+async def get_disciplines(
+    request: Request,
+    project_id: int,
+    current_user: User = Depends(require_user),
+    access_token: str = Depends(get_access_token_from_session)
+):
     """Get disciplines for a project."""
-    if not access_token:
-        raise HTTPException(status_code=401, detail="Not authenticated")
-    
     try:
-        # Use async version directly
         from core_engine import AsyncProcoreClient
-        from config import settings
         
         client = AsyncProcoreClient(access_token, settings.PROCORE_COMPANY_ID)
         try:
@@ -1266,14 +1461,16 @@ async def get_disciplines(request: Request, project_id: int, access_token: str =
 
 @app.get("/api/drawings")
 @limiter.limit("30/minute")
-async def get_drawings(request: Request, project_id: int, discipline: str, access_token: str = Cookie(None)):
+async def get_drawings(
+    request: Request,
+    project_id: int,
+    discipline: str,
+    current_user: User = Depends(require_user),
+    access_token: str = Depends(get_access_token_from_session)
+):
     """Get drawings for a specific discipline."""
-    if not access_token:
-        raise HTTPException(status_code=401, detail="Not authenticated")
-    
     try:
         from core_engine import AsyncProcoreClient
-        from config import settings
         
         client = AsyncProcoreClient(access_token, settings.PROCORE_COMPANY_ID)
         try:
@@ -1353,21 +1550,18 @@ async def get_rate_limit_status():
 
 @app.get("/api/recent_jobs")
 async def get_recent_jobs(
+    request: Request,
     page: int = 1,
     per_page: int = 6,
+    current_user: User = Depends(require_user),
     db: Session = Depends(get_db)
 ):
-    """Get recent job history with pagination."""
-    # Calculate offset
+    """Get recent job history with pagination. All users see all jobs."""
     offset = (page - 1) * per_page
+    q = db.query(Job)
+    total_count = q.count()
+    jobs = q.order_by(Job.created_at.desc()).offset(offset).limit(per_page).all()
     
-    # Get total count
-    total_count = db.query(Job).count()
-    
-    # Get paginated jobs
-    jobs = db.query(Job).order_by(Job.created_at.desc()).offset(offset).limit(per_page).all()
-    
-    # Convert to dicts and check if PDF files exist
     jobs_list = []
     for job in jobs:
         job_dict = {
@@ -1382,7 +1576,9 @@ async def get_recent_jobs(
             "error_details": job.error_details,
             "total_drawings": job.total_drawings,
             "processed_drawings": job.processed_drawings,
-            "pdf_paths": []  # List of {path, exists} objects
+            "created_by_name": getattr(job, "created_by_name", None),
+            "user_id": getattr(job, "user_id", None),
+            "pdf_paths": []
         }
         
         # Check if PDF file(s) exist
@@ -1473,15 +1669,15 @@ async def get_recent_jobs(
 async def cancel_job(
     request: Request,
     job_id: str,
+    current_user: User = Depends(require_user),
     db: Session = Depends(get_db)
 ):
-    """Cancel a queued or processing job."""
+    """Cancel a queued or processing job. User can cancel own jobs; admin can cancel any."""
     job_record = db.query(Job).filter(Job.id == job_id).first()
-    
     if not job_record:
         raise HTTPException(status_code=404, detail="Job not found")
-    
-    # Only allow cancelling queued or processing jobs
+    if not current_user.is_admin and getattr(job_record, "user_id", None) != current_user.id:
+        raise HTTPException(status_code=403, detail="Not authorized to cancel this job")
     if job_record.status not in ["queued", "processing", "uploading"]:
         raise HTTPException(
             status_code=400, 
@@ -1508,14 +1704,15 @@ async def cancel_job(
 async def delete_job(
     request: Request,
     job_id: str,
+    current_user: User = Depends(require_user),
     db: Session = Depends(get_db)
 ):
-    """Delete a job from the job history."""
+    """Delete a job from the job history. User can delete own; admin can delete any."""
     job_record = db.query(Job).filter(Job.id == job_id).first()
-    
     if not job_record:
         raise HTTPException(status_code=404, detail="Job not found")
-    
+    if not current_user.is_admin and getattr(job_record, "user_id", None) != current_user.id:
+        raise HTTPException(status_code=403, detail="Not authorized to delete this job")
     # Optionally delete associated PDF file(s) if they exist
     if job_record.result_message:
         pdf_paths = extract_pdf_paths_from_result_message(job_record.result_message)
@@ -1535,19 +1732,78 @@ async def delete_job(
     return {"status": "deleted", "job_id": job_id}
 
 
+@app.post("/api/jobs/{job_id}/retrigger")
+@limiter.limit("10/minute")
+async def retrigger_job(
+    request: Request,
+    job_id: str,
+    background_tasks: BackgroundTasks,
+    current_user: User = Depends(require_user),
+    db: Session = Depends(get_db)
+):
+    """Retrigger a failed, completed, or cancelled job. Admin can retrigger any; owner can retrigger own. Uses job owner's Procore token."""
+    job_record = db.query(Job).filter(Job.id == job_id).first()
+    if not job_record:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if not current_user.is_admin and getattr(job_record, "user_id", None) != current_user.id:
+        raise HTTPException(status_code=403, detail="Not authorized to retrigger this job")
+    if job_record.status not in ["failed", "completed", "cancelled"]:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot retrigger job with status '{job_record.status}'. Only failed, completed, or cancelled jobs can be retriggered."
+        )
+    owner_user_id = getattr(job_record, "user_id", None)
+    if not owner_user_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot retrigger: job has no owner (legacy job)."
+        )
+    access_token = get_fresh_access_token_for_user(owner_user_id, db)
+    if not access_token:
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot retrigger: job owner has no valid Procore token."
+        )
+    disciplines = []
+    if job_record.disciplines_json:
+        try:
+            disciplines = json.loads(job_record.disciplines_json)
+        except (json.JSONDecodeError, TypeError):
+            pass
+    if not disciplines:
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot retrigger: job has no disciplines stored."
+        )
+    job_meta = {
+        "id": job_record.id,
+        "project_id": int(job_record.project_id),
+        "project_name": job_record.project_name or "Unknown",
+        "disciplines": disciplines,
+        "drawing_ids": None,
+    }
+    job_record.status = "queued"
+    job_record.progress = 0
+    job_record.error_details = None
+    job_record.result_message = None
+    job_record.updated_at = datetime.utcnow()
+    db.commit()
+    background_tasks.add_task(process_batch_sequence, [job_meta], access_token)
+    logger.info(f"Job {job_id} retriggered by {current_user.email}")
+    return {"status": "retriggered", "job_id": job_id}
+
+
 @app.post("/api/start_job")
 @limiter.limit("5/minute")
 async def start_job(
     request: Request,
     batch_request: BatchRequest,
     background_tasks: BackgroundTasks,
-    db: Session = Depends(get_db),
-    access_token: str = Cookie(None)
+    current_user: User = Depends(require_user),
+    access_token: str = Depends(get_access_token_from_session),
+    db: Session = Depends(get_db)
 ):
-    """Start a batch of jobs."""
-    if not access_token:
-        raise HTTPException(status_code=401, detail="Not authenticated")
-    
+    """Start a batch of jobs for current user."""
     batch_jobs = []
     for item in batch_request.queue:
         job_id = str(uuid.uuid4())
@@ -1556,7 +1812,9 @@ async def start_job(
             status="queued",
             project_id=str(item.project_id),
             project_name=item.project_name,
-            disciplines_json=json.dumps(item.disciplines)  # Store disciplines for queued job processing
+            disciplines_json=json.dumps(item.disciplines),
+            user_id=current_user.id,
+            created_by_name=current_user.name or current_user.email
         )
         db.add(new_job)
         batch_jobs.append({
@@ -1565,12 +1823,9 @@ async def start_job(
             "disciplines": item.disciplines,
             "drawing_ids": item.drawing_ids if hasattr(item, 'drawing_ids') else None
         })
-    
     db.commit()
     
-    # Check if any job is currently processing or uploading
     active_jobs = db.query(Job).filter(Job.status.in_(["processing", "uploading"])).count()
-    
     if active_jobs > 0:
         logger.info(f"Queued {len(batch_jobs)} job(s) - {active_jobs} job(s) currently running, will process when available")
         return {
@@ -1578,8 +1833,6 @@ async def start_job(
             "count": len(batch_jobs),
             "message": f"{active_jobs} job(s) currently running. Your job(s) will start when they complete."
         }
-    
-    # No active jobs - start processing immediately
     background_tasks.add_task(process_batch_sequence, batch_jobs, access_token)
     
     logger.info(f"Queued {len(batch_jobs)} jobs - starting immediately")
@@ -1587,10 +1840,36 @@ async def start_job(
 
 
 @app.get("/api/schedules")
-async def get_schedules(db: Session = Depends(get_db)):
-    """Get all scheduled jobs."""
-    schedules = db.query(ScheduledJob).filter(ScheduledJob.active == True).all()
-    return schedules
+async def get_schedules(
+    request: Request,
+    current_user: User = Depends(require_user),
+    db: Session = Depends(get_db)
+):
+    """Get scheduled jobs. All users see all schedules."""
+    q = db.query(ScheduledJob).filter(ScheduledJob.active == True)
+    schedules = q.all()
+    result = []
+    for s in schedules:
+        created_by_email = None
+        if getattr(s, "user_id", None):
+            creator = db.query(User).filter(User.id == s.user_id).first()
+            if creator:
+                created_by_email = creator.email
+        result.append({
+            "id": s.id,
+            "project_id": s.project_id,
+            "project_name": s.project_name,
+            "disciplines_json": s.disciplines_json,
+            "day_of_week": s.day_of_week,
+            "hour": s.hour,
+            "minute": s.minute,
+            "timezone": s.timezone,
+            "active": s.active,
+            "created_at": s.created_at.isoformat() if s.created_at else None,
+            "created_by_name": getattr(s, "created_by_name", None),
+            "created_by_email": created_by_email,
+        })
+    return result
 
 
 @app.post("/api/schedule_batch")
@@ -1598,11 +1877,18 @@ async def get_schedules(db: Session = Depends(get_db)):
 async def create_schedule(
     request: Request,
     schedule_request: ScheduleRequest,
+    current_user: User = Depends(require_user),
     db: Session = Depends(get_db)
 ):
-    """Create scheduled jobs."""
+    """Create scheduled jobs. Admin can pass as_user_id to create schedule for another user."""
+    effective_user_id = current_user.id
+    if current_user.is_admin and schedule_request.as_user_id:
+        target_user = db.query(User).filter(User.id == schedule_request.as_user_id, User.is_active == True).first()
+        if target_user:
+            effective_user_id = target_user.id
+        else:
+            raise HTTPException(status_code=400, detail="Target user not found or inactive.")
     h, m = map(int, schedule_request.time.split(":"))
-    
     saved_count = 0
     for item in schedule_request.queue:
         s_job = ScheduledJob(
@@ -1613,28 +1899,175 @@ async def create_schedule(
             day_of_week=schedule_request.day,
             hour=h,
             minute=m,
-            timezone=schedule_request.timezone
+            timezone=schedule_request.timezone,
+            user_id=effective_user_id,
+            created_by_name=current_user.name or current_user.email
         )
         db.add(s_job)
         saved_count += 1
-    
     db.commit()
-    
-    logger.info(f"Created {saved_count} scheduled jobs")
+    logger.info(f"Created {saved_count} scheduled jobs for user %s (created by %s)", effective_user_id, current_user.email)
     return {"status": "scheduled", "count": saved_count}
 
 
 @app.delete("/api/schedule/{job_id}")
-async def delete_schedule(job_id: str, db: Session = Depends(get_db)):
-    """Delete a scheduled job."""
-    deleted = db.query(ScheduledJob).filter(ScheduledJob.id == job_id).delete()
-    db.commit()
-    
-    if deleted:
-        logger.info(f"Deleted schedule {job_id}")
-        return {"status": "deleted"}
-    else:
+async def delete_schedule(
+    job_id: str,
+    current_user: User = Depends(require_user),
+    db: Session = Depends(get_db)
+):
+    """Delete a scheduled job. User can delete own; admin can delete any."""
+    s = db.query(ScheduledJob).filter(ScheduledJob.id == job_id).first()
+    if not s:
         raise HTTPException(status_code=404, detail="Schedule not found")
+    if not current_user.is_admin and getattr(s, "user_id", None) != current_user.id:
+        raise HTTPException(status_code=403, detail="Not authorized to delete this schedule")
+    db.delete(s)
+    db.commit()
+    logger.info(f"Deleted schedule {job_id}")
+    return {"status": "deleted"}
+
+
+# ---------------------------------------------------------
+# ADMIN ENDPOINTS
+# ---------------------------------------------------------
+
+@app.get("/api/admin/users")
+async def admin_list_users(
+    current_user: User = Depends(require_admin),
+    db: Session = Depends(get_db)
+):
+    """List all users (admin only)."""
+    users = db.query(User).filter(User.is_active == True).all()
+    return [
+        {
+            "id": u.id,
+            "email": u.email,
+            "name": u.name,
+            "is_admin": u.is_admin,
+            "last_login": u.last_login.isoformat() if u.last_login else None,
+            "created_at": u.created_at.isoformat() if u.created_at else None,
+        }
+        for u in users
+    ]
+
+
+@app.post("/api/admin/users/{user_id}/toggle_admin")
+async def admin_toggle_admin(
+    user_id: str,
+    current_user: User = Depends(require_admin),
+    db: Session = Depends(get_db)
+):
+    """Toggle admin flag for a user (admin only)."""
+    u = db.query(User).filter(User.id == user_id).first()
+    if not u:
+        raise HTTPException(status_code=404, detail="User not found")
+    u.is_admin = not u.is_admin
+    db.commit()
+    return {"status": "ok", "user_id": user_id, "is_admin": u.is_admin}
+
+
+@app.post("/api/admin/users/{user_id}/deactivate")
+async def admin_deactivate_user(
+    user_id: str,
+    current_user: User = Depends(require_admin),
+    db: Session = Depends(get_db)
+):
+    """Deactivate a user. Their schedules will stop running (admin only)."""
+    u = db.query(User).filter(User.id == user_id).first()
+    if not u:
+        raise HTTPException(status_code=404, detail="User not found")
+    u.is_active = False
+    db.commit()
+    return {"status": "ok", "user_id": user_id, "is_active": False}
+
+
+@app.get("/api/admin/users/{user_id}/projects")
+@limiter.limit("30/minute")
+async def admin_get_user_projects(
+    request: Request,
+    user_id: str,
+    current_user: User = Depends(require_admin),
+    db: Session = Depends(get_db)
+):
+    """Get Procore projects for a specific user (admin only). Uses that user's token."""
+    access_token = get_fresh_access_token_for_user(user_id, db)
+    if not access_token:
+        raise HTTPException(
+            status_code=400,
+            detail="User has no valid Procore token."
+        )
+    try:
+        from core_engine import AsyncProcoreClient
+        client = AsyncProcoreClient(access_token, settings.PROCORE_COMPANY_ID)
+        try:
+            data = await client.get("/rest/v1.0/projects", params={"company_id": settings.PROCORE_COMPANY_ID})
+            projects = data if isinstance(data, list) else []
+            projects.sort(key=lambda x: x.get('name', ''))
+            return projects
+        finally:
+            await client.close()
+    except Exception as e:
+        logger.error(f"Error fetching projects for user {user_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/admin/users/{user_id}/disciplines")
+@limiter.limit("30/minute")
+async def admin_get_user_disciplines(
+    request: Request,
+    user_id: str,
+    project_id: int,
+    current_user: User = Depends(require_admin),
+    db: Session = Depends(get_db)
+):
+    """Get disciplines for a project using a specific user's token (admin only)."""
+    access_token = get_fresh_access_token_for_user(user_id, db)
+    if not access_token:
+        raise HTTPException(
+            status_code=400,
+            detail="User has no valid Procore token."
+        )
+    try:
+        from core_engine import AsyncProcoreClient
+        client = AsyncProcoreClient(access_token, settings.PROCORE_COMPANY_ID)
+        try:
+            r_area = await client.get(f"/rest/v1.1/projects/{project_id}/drawing_areas")
+            area_id = None
+            for a in r_area:
+                if a['name'].strip().upper() == "IFC":
+                    area_id = a['id']
+                    break
+            if not area_id:
+                return {"error": "No 'IFC' Drawing Area found.", "disciplines": []}
+            endpoint = f"/rest/v1.1/drawing_areas/{area_id}/drawings"
+            all_drawings = []
+            page = 1
+            while True:
+                data = await client.get(endpoint, params={"project_id": project_id, "page": page, "per_page": 100})
+                if not data:
+                    break
+                all_drawings.extend(data)
+                if len(data) < 100:
+                    break
+                page += 1
+            discipline_counts = {}
+            for dwg in all_drawings:
+                d_name = "Unknown"
+                if dwg.get("drawing_discipline"):
+                    d_name = dwg["drawing_discipline"].get("name", "Unknown")
+                elif dwg.get("discipline"):
+                    d_name = dwg["discipline"]
+                discipline_counts[d_name] = discipline_counts.get(d_name, 0) + 1
+            disciplines_with_counts = [
+                {"name": k, "count": v} for k, v in sorted(discipline_counts.items(), key=lambda x: -x[1])
+            ]
+            return {"disciplines": disciplines_with_counts}
+        finally:
+            await client.close()
+    except Exception as e:
+        logger.error(f"Error fetching disciplines for user {user_id} project {project_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/health", response_model=HealthResponse)

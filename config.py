@@ -29,6 +29,7 @@ class Settings(BaseSettings):
     
     # Security
     SECRET_KEY: Optional[str] = None  # For token encryption
+    SESSION_TTL: int = 86400  # Session cookie lifetime in seconds (24 hours)
     
     # Performance (Memory-Tunable for low-RAM environments like Render.com)
     MAX_CONCURRENT_DOWNLOADS: int = 3  # Reduced from 10 to prevent OOM on 2GB RAM

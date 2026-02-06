@@ -416,6 +416,62 @@
             transition: width 1s;
         }
 
+        /* USER MANAGEMENT - ADMIN ONLY */
+        .user-management-panel {
+            grid-column: 2;
+            grid-row: 2;
+            display: flex;
+            flex-direction: column;
+            max-height: 280px;
+        }
+
+        #admin-user-list {
+            overflow-y: auto;
+            flex: 1;
+            min-height: 0;
+        }
+
+        .admin-user-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 10px 12px;
+            margin-bottom: 6px;
+            background: #252525;
+            border: 1px solid #3a3a3a;
+            border-radius: 6px;
+            font-size: 13px;
+        }
+
+        .admin-user-info {
+            flex: 1;
+            min-width: 0;
+        }
+
+        .admin-user-email {
+            font-weight: 600;
+            color: #e0e0e0;
+        }
+
+        .admin-user-name {
+            font-size: 11px;
+            color: #888;
+        }
+
+        .admin-badge {
+            font-size: 10px;
+            padding: 2px 6px;
+            border-radius: 4px;
+            background: #27ae60;
+            color: white;
+            margin-right: 8px;
+        }
+
+        .admin-badge.no {
+            background: #555;
+            color: #aaa;
+        }
+
 
         /* METRICS */
         .metrics-grid {
@@ -615,6 +671,10 @@
                 grid-column: 1;
                 grid-row: 2;
             }
+            .user-management-panel {
+                grid-column: 1;
+                grid-row: 3;
+            }
             .history-panel {
                 grid-column: 1;
                 grid-row: 4;
@@ -631,6 +691,10 @@
         </div>
         <div class="header-right">
             <div class="header-title">DRAWINGS MERGER APPLICATION</div>
+            <div id="user-info" style="display: flex; align-items: center; gap: 12px; margin-right: 15px;">
+                <span id="user-name" style="font-size: 12px; color: #ccc;"></span>
+                <a id="logout-link" href="/logout" style="font-size: 11px; color: #888;">Logout</a>
+            </div>
             <div class="status-indicator">
                 <div class="status-dot"></div>
                 <span style="font-size: 10px;">OPERATIONAL</span>
@@ -654,6 +718,38 @@
         <div class="panel job-manager">
             <div class="panel-title">🚀 JOB MANAGER</div>
             
+            <!-- Admin: Create automation for another user (collapsible, admin only) -->
+            <div id="admin-create-for-user-section" style="display:none; margin-bottom:20px; padding:15px; background:#1f2a1f; border:1px solid #2a3a2a; border-radius:8px;">
+                <div style="display:flex; align-items:center; justify-content:space-between; cursor:pointer;" onclick="toggleAdminCreateSection()">
+                    <span class="label" style="margin-top:0;">👤 Admin: Create automation for another user</span>
+                    <span id="admin-create-section-arrow" style="font-size:14px;">▼</span>
+                </div>
+                <div id="admin-create-for-user-form" style="display:none; margin-top:15px;">
+                    <label class="label">Select User</label>
+                    <select id="admin-create-user-select" onchange="adminLoadUserProjects()">
+                        <option value="">-- Select User --</option>
+                    </select>
+                    <label class="label">Select Project</label>
+                    <select id="admin-create-project-select" onchange="adminLoadUserDisciplines()" disabled>
+                        <option value="">-- Select User first --</option>
+                    </select>
+                    <label class="label">Select Disciplines</label>
+                    <select id="admin-create-discipline-select" multiple size="5" disabled></select>
+                    <div style="display:flex; gap:10px; margin-top:15px;">
+                        <select id="admin-create-day">
+                            <option value="Mon">Monday</option>
+                            <option value="Tue">Tuesday</option>
+                            <option value="Wed">Wednesday</option>
+                            <option value="Thu">Thursday</option>
+                            <option value="Fri" selected>Friday</option>
+                            <option value="Sat">Saturday</option>
+                            <option value="Sun">Sunday</option>
+                        </select>
+                        <input type="time" id="admin-create-time" value="17:30">
+                    </div>
+                    <button class="btn btn-primary" onclick="adminSaveAutomationForUser()" style="margin-top:15px;">✅ Save Automation</button>
+                </div>
+            </div>
             
             <label class="label">1. BUILD YOUR QUEUE</label>
         <select id="project-select" onchange="loadDisciplines()">
@@ -744,13 +840,24 @@
                     <span class="live-dot"></span>
                     <span style="font-size: 11px; color: #e74c3c;">• LIVE</span>
                 </span>
-    </div>
+            </div>
             <div id="schedule-list">
                 <div style="color:#666; text-align:center; padding:20px;">Loading...</div>
             </div>
         </div>
 
-
+        <!-- USER MANAGEMENT (admin only) -->
+        <div id="admin-user-management-section" class="panel user-management-panel" style="display:none;">
+            <div style="display:flex; align-items:center; justify-content:space-between; cursor:pointer;" onclick="toggleAdminUserSection()">
+                <div class="panel-title" style="margin-bottom:0;">👤 User Management</div>
+                <span id="admin-user-section-arrow" style="font-size:14px;">▼</span>
+            </div>
+            <div id="admin-user-list-wrapper" style="display:none; margin-top:15px; flex:1; min-height:0; overflow:hidden;">
+                <div id="admin-user-list">
+                    <div style="color:#666; text-align:center; padding:20px;">Loading...</div>
+                </div>
+            </div>
+        </div>
 
         <!-- RECENT JOB HISTORY -->
         <div class="panel history-panel">
@@ -760,6 +867,7 @@
                 <tr>
                         <th>TIME</th>
                         <th>PROJECT</th>
+                        <th>CREATED BY</th>
                         <th>PROGRESS</th>
                         <th>RUNTIME</th>
                         <th>RESULT</th>
@@ -793,10 +901,11 @@
         }
         
         let jobQueue = [];
-        let directScheduleProject = null; // Store project for direct scheduling in simple mode
+        let directScheduleProject = null;
         const userTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
         let isRedirecting = false;
         let currentHistoryPage = 1;
+        let currentUser = null; // { name, email, is_admin } from /api/me
 
         // Helper function to fetch all disciplines for a project (used in simple mode)
         async function fetchAllDisciplinesForProject(projectId) {
@@ -859,6 +968,28 @@
                 });
         }
 
+        // Load current user then init
+        authenticatedFetch('/api/me')
+            .then(r => r.json())
+            .then(me => {
+                currentUser = me;
+                const nameEl = document.getElementById('user-name');
+                if (nameEl) nameEl.textContent = me.name || me.email || 'User';
+                // Show admin sections only to admins
+                if (me.is_admin) {
+                    const adminCreateSection = document.getElementById('admin-create-for-user-section');
+                    if (adminCreateSection) adminCreateSection.style.display = 'block';
+                    const adminUserSection = document.getElementById('admin-user-management-section');
+                    if (adminUserSection) {
+                        adminUserSection.style.display = 'flex';
+                        adminUserSection.style.flexDirection = 'column';
+                        loadAdminUsers();
+                        loadAdminUserList();
+                    }
+                }
+            })
+            .catch(() => { currentUser = {}; });
+
         // Initialize
         authenticatedFetch('/api/projects')
             .then(r => r.json())
@@ -873,9 +1004,8 @@
                 }
             });
 
-        // Initialize: always start on page 1 to show most recent jobs
         currentHistoryPage = 1;
-        loadRecentJobs(); 
+        loadRecentJobs();
         loadSchedules();
         
         // Update rate limit status immediately and then every 5 seconds
@@ -1560,6 +1690,9 @@
                     const nextRun = calculateNextRun(s.day_of_week, s.hour, s.minute, s.timezone);
                     const timeUntil = getTimeUntil(nextRun);
                     
+                    const creatorDisplay = (currentUser && currentUser.is_admin && (s.created_by_name || s.created_by_email))
+                        ? `Created by: ${s.created_by_name || s.created_by_email}${s.created_by_email ? ` (${s.created_by_email})` : ''}`
+                        : '';
                     card.innerHTML = `
                         <div class="automation-card-header">
                             <div class="automation-time">
@@ -1568,7 +1701,7 @@
                             </div>
                             <button class="automation-delete-btn" onclick="deleteSchedule('${s.id}')" title="Delete automation">X</button>
                         </div>
-                        <div style="margin-bottom: 6px; font-size: 12px;">Project: <b>${s.project_name}</b></div>
+                        <div style="margin-bottom: 6px; font-size: 12px;">Project: <b>${s.project_name}</b>${creatorDisplay ? ` <span style="color:#888;">– ${creatorDisplay}</span>` : ''}</div>
                         <div class="countdown">
                             NEXT RUN IN: <span id="countdown-${s.id}">${timeUntil}</span> <span style="font-size: 10px; color: #666;">(DD:HH:MM:SS)</span>
                             <div class="countdown-bar">
@@ -1638,16 +1771,12 @@
             authenticatedFetch('/api/schedules')
                 .then(r => r.json())
                 .then(data => {
-                    data.forEach(s => {
+                    (data || []).forEach(s => {
                         const nextRun = calculateNextRun(s.day_of_week, s.hour, s.minute, s.timezone);
                         updateCountdown(s.id, nextRun);
                     });
                 })
-                .catch(error => {
-                    if (error.message !== 'Authentication failed') {
-                        console.error('Error updating countdown:', error);
-                    }
-                });
+                .catch(() => {});
         }, 1000);
 
         function deleteSchedule(id) {
@@ -1685,9 +1814,8 @@
                     
                 const tbody = document.getElementById('jobs-table-body');
                 tbody.innerHTML = '';
-                    
                     if (jobs.length === 0) {
-                        tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:#888;padding:20px;">No jobs found</td></tr>';
+                        tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:#888;padding:20px;">No jobs found</td></tr>';
                     }
                     
                 jobs.forEach(j => {
@@ -1797,9 +1925,13 @@
                                 resultHtml = `<span style="color:#e74c3c; font-size:12px;">Failed</span>`;
                             }
                         }
-                        actionHtml = `<div class="action-buttons">${resultHtml}<button onclick="deleteJob('${j.id}')" class="delete-btn" title="Delete this job from history">X</button></div>`;
+                        const showRetrigger = currentUser && (currentUser.is_admin || j.user_id === currentUser.id);
+                        const retriggerBtn = showRetrigger ? `<button onclick="retriggerJob('${j.id}')" class="btn btn-secondary" style="padding:6px 12px; font-size:12px;" title="Run this job again">↻ Retrigger</button>` : '';
+                        actionHtml = `<div class="action-buttons">${resultHtml}${retriggerBtn}<button onclick="deleteJob('${j.id}')" class="delete-btn" title="Delete this job from history">X</button></div>`;
                     } else if (j.status === 'cancelled') {
-                        actionHtml = `<div class="action-buttons"><span style="color:#95a5a6; font-size:12px;">Cancelled</span><button onclick="deleteJob('${j.id}')" class="delete-btn" title="Delete this job from history">X</button></div>`;
+                        const showRetrigger = currentUser && (currentUser.is_admin || j.user_id === currentUser.id);
+                        const retriggerBtn = showRetrigger ? `<button onclick="retriggerJob('${j.id}')" class="btn btn-secondary" style="padding:6px 12px; font-size:12px; margin-right:8px;" title="Run this job again">↻ Retrigger</button>` : '';
+                        actionHtml = `<div class="action-buttons">${retriggerBtn}<span style="color:#95a5a6; font-size:12px;">Cancelled</span><button onclick="deleteJob('${j.id}')" class="delete-btn" title="Delete this job from history">X</button></div>`;
                     }
 
                     const tr = document.createElement('tr');
@@ -1826,12 +1958,13 @@
                     tr.innerHTML = `
                         <td style="width:15%"><div style="font-size:11px;color:#888;">${dateStr}</div><div style="font-size:12px;">${timeStr}</div></td>
                         <td style="width:22%"><b>${j.project_name || 'Unknown'}</b></td>
-                            <td style="width:30%">
+                        <td style="width:12%;font-size:11px;color:#888;">${(j.created_by_name || '-')}</td>
+                        <td style="width:30%">
                             <span class="progress-text">${statusText} ${pct}%</span>
-                                <div class="progress-container">
-                                    <div class="progress-bar" style="width: ${pct}%; background-color:${barColor}"></div>
-                                </div>
-                            </td>
+                            <div class="progress-container">
+                                <div class="progress-bar" style="width: ${pct}%; background-color:${barColor}"></div>
+                            </div>
+                        </td>
                         <td style="width:18%">${runtimeHtml}</td>
                         <td style="width:15%">${actionHtml}</td>
                     `;
@@ -1863,7 +1996,7 @@
                         console.error('Error loading recent jobs:', error);
                         const tbody = document.getElementById('jobs-table-body');
                         if (tbody) {
-                            tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:#e74c3c;padding:20px;">Error loading jobs. Please refresh the page.</td></tr>';
+                            tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:#e74c3c;padding:20px;">Error loading jobs. Please refresh the page.</td></tr>';
                         }
                     }
                 });
@@ -1916,6 +2049,216 @@
                 console.debug('Could not fetch rate limit status:', error);
                 document.getElementById('rate-limit-indicator').style.display = 'none';
             }
+        }
+
+        function toggleAdminCreateSection() {
+            const form = document.getElementById('admin-create-for-user-form');
+            const arrow = document.getElementById('admin-create-section-arrow');
+            if (form.style.display === 'none') {
+                form.style.display = 'block';
+                arrow.textContent = '▲';
+            } else {
+                form.style.display = 'none';
+                arrow.textContent = '▼';
+            }
+        }
+
+        function toggleAdminUserSection() {
+            const wrapper = document.getElementById('admin-user-list-wrapper');
+            const arrow = document.getElementById('admin-user-section-arrow');
+            if (wrapper.style.display === 'none') {
+                wrapper.style.display = 'block';
+                arrow.textContent = '▲';
+                loadAdminUserList();
+            } else {
+                wrapper.style.display = 'none';
+                arrow.textContent = '▼';
+            }
+        }
+
+        function loadAdminUserList() {
+            const container = document.getElementById('admin-user-list');
+            if (!container) return;
+            container.innerHTML = '<div style="color:#666; text-align:center; padding:20px;">Loading...</div>';
+            authenticatedFetch('/api/admin/users')
+                .then(r => r.json())
+                .then(users => {
+                    container.innerHTML = '';
+                    if (!users || users.length === 0) {
+                        container.innerHTML = '<div style="color:#666; text-align:center; padding:20px;">No users found.</div>';
+                        return;
+                    }
+                    users.forEach(u => {
+                        const displayName = u.name || u.email || '-';
+                        const isRoberto = u.email && u.email.toLowerCase() === 'roberto@flowlly.com';
+                        const canRevoke = !isRoberto && u.is_admin;
+                        const canGrant = !u.is_admin;
+                        const row = document.createElement('div');
+                        row.className = 'admin-user-row';
+                        row.innerHTML = `
+                            <div class="admin-user-info">
+                                <div class="admin-user-email">${u.email || '-'}</div>
+                                <div class="admin-user-name">${displayName}</div>
+                            </div>
+                            <div style="display:flex; align-items:center; gap:8px;">
+                                <span class="admin-badge ${u.is_admin ? '' : 'no'}">${u.is_admin ? 'Admin' : 'User'}</span>
+                                ${canGrant ? `<button class="btn btn-primary" style="padding:4px 10px; font-size:11px;" onclick="toggleUserAdmin('${u.id}')">Grant Admin</button>` : ''}
+                                ${canRevoke ? `<button class="btn btn-secondary" style="padding:4px 10px; font-size:11px;" onclick="toggleUserAdmin('${u.id}')">Revoke Admin</button>` : ''}
+                            </div>
+                        `;
+                        container.appendChild(row);
+                    });
+                })
+                .catch(err => {
+                    if (err.message !== 'Authentication failed') {
+                        container.innerHTML = '<div style="color:#e74c3c; text-align:center; padding:20px;">Error loading users.</div>';
+                        console.error('Error loading admin users:', err);
+                    }
+                });
+        }
+
+        function toggleUserAdmin(userId) {
+            authenticatedFetch(`/api/admin/users/${userId}/toggle_admin`, { method: 'POST' })
+                .then(r => r.json())
+                .then(() => {
+                    loadAdminUserList();
+                })
+                .catch(err => {
+                    if (err.message !== 'Authentication failed') {
+                        alert('Error updating admin role: ' + (err.message || err));
+                    }
+                });
+        }
+
+        function loadAdminUsers() {
+            authenticatedFetch('/api/admin/users')
+                .then(r => r.json())
+                .then(users => {
+                    const sel = document.getElementById('admin-create-user-select');
+                    if (!sel) return;
+                    sel.innerHTML = '<option value="">-- Select User --</option>';
+                    (users || []).forEach(u => {
+                        const display = u.email ? (u.name ? `${u.name} (${u.email})` : u.email) : (u.name || u.id);
+                        sel.innerHTML += `<option value="${u.id}">${display}</option>`;
+                    });
+                })
+                .catch(err => {
+                    if (err.message !== 'Authentication failed') console.error('Error loading admin users:', err);
+                });
+        }
+
+        function adminLoadUserProjects() {
+            const userId = document.getElementById('admin-create-user-select').value;
+            const projectSel = document.getElementById('admin-create-project-select');
+            const disciplineSel = document.getElementById('admin-create-discipline-select');
+            projectSel.disabled = true;
+            projectSel.innerHTML = '<option value="">-- Loading... --</option>';
+            disciplineSel.innerHTML = '';
+            disciplineSel.disabled = true;
+            if (!userId) {
+                projectSel.innerHTML = '<option value="">-- Select User first --</option>';
+                projectSel.disabled = true;
+                return;
+            }
+            authenticatedFetch(`/api/admin/users/${userId}/projects`)
+                .then(r => r.json())
+                .then(projects => {
+                    projectSel.disabled = false;
+                    projectSel.innerHTML = '<option value="">-- Select Project --</option>';
+                    (projects || []).forEach(p => {
+                        projectSel.innerHTML += `<option value="${p.id}">${p.name}</option>`;
+                    });
+                })
+                .catch(err => {
+                    projectSel.disabled = false;
+                    projectSel.innerHTML = '<option value="">Error loading projects</option>';
+                    if (err.message !== 'Authentication failed') alert('Error loading projects: ' + (err.message || err));
+                });
+        }
+
+        function adminLoadUserDisciplines() {
+            const userId = document.getElementById('admin-create-user-select').value;
+            const projectId = document.getElementById('admin-create-project-select').value;
+            const disciplineSel = document.getElementById('admin-create-discipline-select');
+            disciplineSel.disabled = true;
+            disciplineSel.innerHTML = '<option disabled>Loading...</option>';
+            if (!userId || !projectId) {
+                disciplineSel.innerHTML = '';
+                return;
+            }
+            authenticatedFetch(`/api/admin/users/${userId}/disciplines?project_id=${projectId}`)
+                .then(r => r.json())
+                .then(data => {
+                    disciplineSel.disabled = false;
+                    disciplineSel.innerHTML = '';
+                    const discs = data.disciplines || [];
+                    discs.forEach(d => {
+                        const name = typeof d === 'object' ? d.name : d;
+                        const count = typeof d === 'object' ? d.count : 0;
+                        disciplineSel.innerHTML += `<option value="${name}">${name}${count ? ` (${count})` : ''}</option>`;
+                    });
+                })
+                .catch(err => {
+                    disciplineSel.disabled = false;
+                    disciplineSel.innerHTML = '<option disabled>Error loading disciplines</option>';
+                    if (err.message !== 'Authentication failed') alert('Error loading disciplines: ' + (err.message || err));
+                });
+        }
+
+        function adminSaveAutomationForUser() {
+            const userId = document.getElementById('admin-create-user-select').value;
+            const projectSel = document.getElementById('admin-create-project-select');
+            const disciplineSel = document.getElementById('admin-create-discipline-select');
+            const projectId = parseInt(projectSel.value);
+            const projectName = projectSel.options[projectSel.selectedIndex]?.text || '';
+            const disciplines = Array.from(disciplineSel.selectedOptions).map(o => o.value);
+            const day = document.getElementById('admin-create-day').value;
+            const time = document.getElementById('admin-create-time').value;
+            if (!userId || !projectId || disciplines.length === 0) {
+                alert('Please select user, project, and at least one discipline.');
+                return;
+            }
+            const body = {
+                queue: [{ project_id: projectId, project_name: projectName, disciplines: disciplines }],
+                day, time, timezone: userTimezone,
+                as_user_id: userId
+            };
+            authenticatedFetch('/api/schedule_batch', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body)
+            })
+                .then(r => r.json())
+                .then(() => {
+                    document.getElementById('admin-create-user-select').value = '';
+                    const projSel = document.getElementById('admin-create-project-select');
+                    projSel.innerHTML = '<option value="">-- Select User first --</option>';
+                    projSel.disabled = true;
+                    document.getElementById('admin-create-discipline-select').innerHTML = '';
+                    document.getElementById('admin-create-discipline-select').disabled = true;
+                    loadSchedules();
+                })
+                .catch(err => {
+                    if (err.message !== 'Authentication failed') {
+                        alert('Error saving automation: ' + (err.message || err));
+                    }
+                });
+        }
+
+        function retriggerJob(jobId) {
+            authenticatedFetch(`/api/jobs/${jobId}/retrigger`, { method: 'POST' })
+                .then(r => {
+                    if (!r.ok) return r.json().then(err => { throw new Error(err.detail || 'Failed to retrigger'); });
+                    return r.json();
+                })
+                .then(() => {
+                    loadRecentJobs();
+                })
+                .catch(err => {
+                    if (err.message !== 'Authentication failed') {
+                        alert('Error retriggering job: ' + err.message);
+                    }
+                });
         }
 
         function cancelJob(jobId) {
