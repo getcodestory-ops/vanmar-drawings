@@ -70,23 +70,11 @@ def table_exists(conn, table: str, sqlite: bool) -> bool:
 
 
 def run_migration():
-    # #region agent log
-    print("[MIGRATION] Starting add_multi_user migration")
-    try:
-        _logpath = "/Users/robertocervantes/Documents/CodeStory/.cursor/debug.log"
-        with open(_logpath, "a") as _f:
-            import json, time
-            _f.write(json.dumps({"message": "MIGRATION_START", "hypothesisId": "H3", "timestamp": time.time()}) + "\n")
-    except Exception:
-        pass
-    # #endregion
     engine = get_engine()
     sqlite = "sqlite" in engine.url.drivername
-    print(f"[MIGRATION] Database: {'sqlite' if sqlite else 'postgresql'}")
 
     with engine.connect() as conn:
         # 1) Create users table if not exists (app may have already via create_all)
-        print("[MIGRATION] Step 1: users table")
         if not table_exists(conn, "users", sqlite):
             print("Creating users table...")
             if sqlite:
@@ -118,7 +106,6 @@ def run_migration():
             conn.commit()
 
         # 2) Create sessions table if not exists
-        print("[MIGRATION] Step 2: sessions table")
         if not table_exists(conn, "sessions", sqlite):
             print("Creating sessions table...")
             if sqlite:
@@ -145,7 +132,6 @@ def run_migration():
             conn.commit()
 
         # 3) Add user_id, created_by_name to jobs
-        print("[MIGRATION] Step 3: jobs columns")
         for col, typ in (("user_id", "VARCHAR" if sqlite else "VARCHAR"), ("created_by_name", "VARCHAR" if sqlite else "VARCHAR")):
             if not column_exists(conn, "jobs", col, sqlite):
                 print(f"Adding jobs.{col}...")
@@ -153,17 +139,12 @@ def run_migration():
                 conn.commit()
 
         # 4) Add user_id to token_store
-        print("[MIGRATION] Step 4: token_store.user_id")
-        tok_user_exists = column_exists(conn, "token_store", "user_id", sqlite)
-        print(f"[MIGRATION] token_store.user_id column_exists={tok_user_exists}")
-        if not tok_user_exists:
-            print("[MIGRATION] Adding token_store.user_id...")
+        if not column_exists(conn, "token_store", "user_id", sqlite):
+            print("Adding token_store.user_id...")
             conn.execute(text("ALTER TABLE token_store ADD COLUMN user_id VARCHAR"))
             conn.commit()
-            print("[MIGRATION] token_store.user_id added successfully")
 
         # 5) Add user_id, created_by_name to scheduled_jobs
-        print("[MIGRATION] Step 5: scheduled_jobs columns")
         for col in ("user_id", "created_by_name"):
             if not column_exists(conn, "scheduled_jobs", col, sqlite):
                 print(f"Adding scheduled_jobs.{col}...")
@@ -171,7 +152,6 @@ def run_migration():
                 conn.commit()
 
         # 6) If there are token_store rows with user_id NULL, create Legacy user and assign
-        print("[MIGRATION] Step 6: Legacy user")
         r = conn.execute(text("SELECT COUNT(*) FROM token_store WHERE user_id IS NULL"))
         null_count = r.scalar() or 0
         if null_count > 0:

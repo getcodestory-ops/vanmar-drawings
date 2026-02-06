@@ -218,6 +218,14 @@ async def lifespan(app: FastAPI):
     logger.info(f"Starting Procore PDF Merger - Environment: {settings.ENVIRONMENT}")
     logger.info(f"Database URL: {settings.DATABASE_URL[:20]}..." if settings.DATABASE_URL else "DATABASE_URL not set")
     
+    # Run multi-user migration (adds users, sessions, user_id columns to token_store/jobs/scheduled_jobs)
+    try:
+        from migrations.add_multi_user import run_migration
+        run_migration()
+        logger.info("Multi-user migration completed")
+    except Exception as e:
+        logger.warning(f"Multi-user migration check failed (may already be applied): {e}")
+    
     # Ensure database tables exist
     try:
         Base.metadata.create_all(bind=engine)
